@@ -4,8 +4,11 @@ const homeScreen = document.querySelector("#home-screen");
 const demoScreen = document.querySelector("#demo-screen");
 const launchButton = document.querySelector("#launch-button");
 const homeButton = document.querySelector("#home-button");
+const fullscreenButton = document.querySelector("#fullscreen-button");
+const fullscreenStatus = document.querySelector("#fullscreen-status");
 const stage = document.querySelector("#scene-stage");
 const stereoToggle = document.querySelector("#stereo-toggle");
+const motionOrientation = document.querySelector("#motion-orientation");
 const renderLabels = document.querySelector("#render-labels");
 const sceneMessage = document.querySelector("#scene-message");
 const motionButton = document.querySelector("#motion-button");
@@ -15,10 +18,6 @@ const diagnosticMessage = document.querySelector("#diagnostic-message");
 const motionIndicator = document.querySelector("#motion-indicator");
 const sensitivitySlider = document.querySelector("#sensitivity");
 const sensitivityValue = document.querySelector("#sensitivity-value");
-const raycaster = new THREE.Raycaster();
-const pointerPosition = new THREE.Vector2();
-const screenMeshes = [];
-const screenMaterials = [];
 
 let renderer;
 let scene;
@@ -29,6 +28,7 @@ let animationFrame;
 let orientationAvailable = typeof window.DeviceOrientationEvent === "function";
 let orientationState = "off";
 let currentOrientation = null;
+let lastOrientationEvent = null;
 let recenterOffset = new THREE.Quaternion();
 let manualYaw = 0;
 let manualPitch = 0;
@@ -37,6 +37,7 @@ let pointerDrag = null;
 let resizeObserver;
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const SCREEN_AXIS = new THREE.Vector3(0, 0, 1);
 const orientationQuaternion = new THREE.Quaternion();
 const screenTransform = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
 const cameraEuler = new THREE.Euler(0, 0, 0, "YXZ");
@@ -45,19 +46,8 @@ const eyeOffset = new THREE.Vector3();
 const deviceOrientationHandler = (event) => {
   if (![event.alpha, event.beta, event.gamma].every(Number.isFinite)) return;
 
-  cameraEuler.set(
-    THREE.MathUtils.degToRad(event.beta),
-    THREE.MathUtils.degToRad(event.alpha),
-    THREE.MathUtils.degToRad(-event.gamma),
-  );
-  orientationQuaternion.setFromEuler(cameraEuler).multiply(screenTransform);
-  const screenAngle = window.screen?.orientation?.angle ?? window.orientation ?? 0;
-  screenOrientationQuaternion.setFromAxisAngle(
-    WORLD_UP,
-    -THREE.MathUtils.degToRad(Number(screenAngle) || 0),
-  );
-  orientationQuaternion.multiply(screenOrientationQuaternion);
-  currentOrientation = orientationQuaternion.clone();
+  lastOrientationEvent = { alpha: event.alpha, beta: event.beta, gamma: event.gamma };
+  updateDeviceOrientation(lastOrientationEvent);
 
   if (orientationState === "listening") {
     orientationState = "active";
@@ -67,6 +57,28 @@ const deviceOrientationHandler = (event) => {
   }
   updateMotionReadout(event);
 };
+
+function updateDeviceOrientation(event) {
+  cameraEuler.set(
+    THREE.MathUtils.degToRad(event.beta),
+    THREE.MathUtils.degToRad(event.alpha),
+    THREE.MathUtils.degToRad(-event.gamma),
+  );
+  orientationQuaternion.setFromEuler(cameraEuler).multiply(screenTransform);
+  const detectedAngle = Number(window.screen?.orientation?.angle ?? window.orientation ?? 0) || 0;
+  const screenAngle =
+    motionOrientation.value === "portrait"
+      ? 0
+      : motionOrientation.value === "landscape" && Math.abs(detectedAngle % 180) !== 90
+        ? 90
+        : detectedAngle;
+  screenOrientationQuaternion.setFromAxisAngle(
+    SCREEN_AXIS,
+    -THREE.MathUtils.degToRad(Number(screenAngle) || 0),
+  );
+  orientationQuaternion.multiply(screenOrientationQuaternion);
+  currentOrientation = orientationQuaternion.clone();
+}
 
 launchButton.addEventListener("click", () => {
   homeScreen.hidden = true;
@@ -83,6 +95,10 @@ homeButton.addEventListener("click", () => {
 document.querySelector("#recenter-button").addEventListener("click", recenterView);
 document.querySelector("#recenter-top").addEventListener("click", recenterView);
 document.querySelector("#stereo-recenter").addEventListener("click", recenterView);
+fullscreenButton.addEventListener("click", toggleFullscreen);
+document.addEventListener("fullscreenchange", updateFullscreenButton);
+motionOrientation.addEventListener("change", refreshScreenOrientation);
+window.screen?.orientation?.addEventListener("change", refreshScreenOrientation);
 document.querySelector("#stereo-exit").addEventListener("click", () => {
   stereoToggle.checked = false;
   stereoToggle.dispatchEvent(new Event("change", { bubbles: true }));
@@ -112,7 +128,6 @@ stage.addEventListener("pointermove", onPointerMove);
 stage.addEventListener("pointerup", onPointerUp);
 stage.addEventListener("pointercancel", onPointerUp);
 stage.addEventListener("lostpointercapture", onPointerUp);
-stage.addEventListener("click", inspectFloatingScreen);
 window.addEventListener("keydown", onKeyDown);
 window.addEventListener("orientationchange", refreshScreenOrientation);
 
@@ -193,12 +208,37 @@ async function enableMotion() {
 }
 
 function refreshScreenOrientation() {
-  if (!currentOrientation) return;
-  const angle = window.screen?.orientation?.angle ?? window.orientation ?? 0;
-  screenOrientationQuaternion.setFromAxisAngle(
-    WORLD_UP,
-    -THREE.MathUtils.degToRad(Number(angle) || 0),
-  );
+  if (!lastOrientationEvent) return;
+  updateDeviceOrientation(lastOrientationEvent);
+  if (orientationState === "active" || orientationState === "listening") {
+    recenterOffset.copy(currentOrientation).invert();
+  }
+}
+
+async function toggleFullscreen() {
+  fullscreenStatus.hidden = true;
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else if (demoScreen.requestFullscreen) {
+      await demoScreen.requestFullscreen();
+    } else {
+      fullscreenStatus.textContent = "Full screen is not supported by this browser.";
+      fullscreenStatus.hidden = false;
+    }
+  } catch (error) {
+    console.error("Unable to change full-screen mode:", error);
+    fullscreenStatus.textContent = "The browser could not enter full screen. Check its full-screen permissions.";
+    fullscreenStatus.hidden = false;
+  }
+}
+
+function updateFullscreenButton() {
+  const isFullscreen = document.fullscreenElement === demoScreen;
+  const label = isFullscreen ? "Exit full screen" : "Full screen";
+  fullscreenButton.setAttribute("aria-label", isFullscreen ? "Exit full screen" : "Enter full screen");
+  fullscreenButton.querySelector("span").textContent = label;
+  fullscreenStatus.hidden = true;
 }
 
 function recenterView() {
@@ -260,7 +300,6 @@ function createScene() {
 
   buildRoom();
   buildDecor();
-  buildFloatingScreen();
   renderer.setAnimationLoop(null);
 }
 
@@ -285,27 +324,10 @@ function buildRoom() {
     scene.add(wall);
   }
 
-  const ceiling = new THREE.Mesh(
-    new THREE.PlaneGeometry(12, 12),
-    new THREE.MeshStandardMaterial({ color: 0x262839, roughness: 1 }),
-  );
-  ceiling.rotation.x = Math.PI / 2;
-  ceiling.position.set(0, 5, 1);
-  scene.add(ceiling);
-
-  const grid = new THREE.GridHelper(12, 24, 0x8d7ab2, 0x635b7c);
-  grid.position.set(0, 0.012, 1);
-  scene.add(grid);
-
-  scene.add(new THREE.HemisphereLight(0xc9d8ff, 0x393346, 2.1));
-
-  const keyLight = new THREE.PointLight(0xbba6ff, 37, 13, 2);
-  keyLight.position.set(-2, 3.7, -2);
-  scene.add(keyLight);
-
-  const fillLight = new THREE.PointLight(0x8de4d0, 22, 9, 2);
-  fillLight.position.set(3, 2.9, 1);
-  scene.add(fillLight);
+  scene.add(new THREE.HemisphereLight(0xffe8ca, 0x373047, 1.8));
+  const ceilingGlow = new THREE.PointLight(0xffd59e, 22, 18, 2);
+  ceilingGlow.position.set(0, 4.35, -0.5);
+  scene.add(ceilingGlow);
 }
 
 function addBox(position, scale, color, rotation = 0) {
@@ -330,91 +352,130 @@ function addCylinder(position, radius, height, color) {
   return mesh;
 }
 
-function buildDecor() {
-  addBox([0, 1.28, -4.84], [3.25, 2.12, 0.08], 0xc5bbeb);
-  addBox([0, 1.26, -4.75], [3.05, 1.91, 0.09], 0x4f687b);
-  addBox([-1.05, 1.28, -4.67], [0.035, 1.82, 0.035], 0xddc3f3);
-  addBox([1.07, 1.28, -4.67], [0.035, 1.82, 0.035], 0xddc3f3);
-  addBox([0, 2.23, -4.67], [2.17, 0.04, 0.035], 0xddc3f3);
-
-  const globe = new THREE.Mesh(
-    new THREE.SphereGeometry(0.42, 32, 24),
-    new THREE.MeshStandardMaterial({ color: 0xefadbf, roughness: 0.28, metalness: 0.1 }),
+function addCone(position, radius, height, color) {
+  const mesh = new THREE.Mesh(
+    new THREE.ConeGeometry(radius, height, 20, 1, true),
+    new THREE.MeshStandardMaterial({ color, roughness: 0.7, side: THREE.DoubleSide }),
   );
-  globe.position.set(-2.2, 0.43, -1.75);
-  scene.add(globe);
-
-  addBox([2.05, 0.42, -2.7], [0.68, 0.82, 0.68], 0x8ddcc9, 0.24);
-  addBox([-1.5, 0.21, 0.7], [0.48, 0.42, 0.45], 0xd6bdff, 0.25);
-  addCylinder([2.75, 0.29, 0.15], 0.36, 0.58, 0xf5cf93);
-
-  const torus = new THREE.Mesh(
-    new THREE.TorusGeometry(0.55, 0.065, 10, 48),
-    new THREE.MeshStandardMaterial({ color: 0xc1adff, emissive: 0x36254c }),
-  );
-  torus.position.set(-3.2, 1.7, -3.45);
-  scene.add(torus);
-
-  addBox([0, 0.08, -2.2], [2.15, 0.16, 1.2], 0x796794);
-  addBox([0, 0.18, -2.2], [1.92, 0.08, 1.04], 0xc8adf1);
+  mesh.position.set(...position);
+  mesh.rotation.z = Math.PI;
+  scene.add(mesh);
+  return mesh;
 }
 
-function buildFloatingScreen() {
-  const frame = new THREE.Mesh(
-    new THREE.BoxGeometry(1.4, 0.92, 0.09),
-    new THREE.MeshStandardMaterial({ color: 0xddd5f4, roughness: 0.3, metalness: 0.15 }),
+function addSoftCushion(position, scale, color) {
+  const cushion = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 18, 12),
+    new THREE.MeshStandardMaterial({ color, roughness: 0.9 }),
   );
-  frame.position.set(0, 2.2, -3.35);
-  scene.add(frame);
+  cushion.position.set(...position);
+  cushion.scale.set(...scale);
+  scene.add(cushion);
+}
 
-  const canvas = document.createElement("canvas");
-  canvas.width = 512;
-  canvas.height = 320;
-  const context = canvas.getContext("2d");
-  const gradient = context.createLinearGradient(0, 0, 512, 320);
-  gradient.addColorStop(0, "#a99af1");
-  gradient.addColorStop(0.56, "#94bde3");
-  gradient.addColorStop(1, "#a8e3d0");
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 512, 320);
-  context.fillStyle = "rgba(255,255,255,.16)";
-  context.beginPath();
-  context.arc(375, 76, 96, 0, Math.PI * 2);
-  context.fill();
-  context.fillStyle = "#fffdf4";
-  context.font = "600 35px sans-serif";
-  context.fillText("HELLO, WORLD", 35, 117);
-  context.fillStyle = "rgba(30,36,57,.8)";
-  context.font = "24px sans-serif";
-  context.fillText("Your very first virtual room.", 37, 163);
-  context.fillStyle = "rgba(255,255,255,.92)";
-  context.beginPath();
-  context.moveTo(61, 203);
-  context.lineTo(186, 203);
-  context.arcTo(210, 203, 210, 227, 24);
-  context.arcTo(210, 252, 186, 252, 24);
-  context.lineTo(61, 252);
-  context.arcTo(37, 252, 37, 228, 24);
-  context.arcTo(37, 203, 61, 203, 24);
-  context.closePath();
-  context.fill();
-  context.fillStyle = "#323149";
-  context.font = "600 18px sans-serif";
-  context.fillText("LOOK AROUND", 61, 234);
+function buildPlant(x, z, scale = 1) {
+  addCylinder([x, 0.2 * scale, z], 0.23 * scale, 0.4 * scale, 0x9a6950);
+  addCylinder([x, 0.4 * scale, z], 0.18 * scale, 0.04 * scale, 0x40342d);
+  for (const [dx, dy, dz, size] of [
+    [-0.2, 0.72, 0, 0.27],
+    [0.18, 0.84, -0.04, 0.3],
+    [0, 1.08, 0.03, 0.32],
+    [0.12, 1.28, 0, 0.24],
+    [-0.16, 1.02, 0.05, 0.24],
+  ]) {
+    const leaf = new THREE.Mesh(
+      new THREE.SphereGeometry(size * scale, 14, 10),
+      new THREE.MeshStandardMaterial({ color: 0x66866b, roughness: 0.8 }),
+    );
+    leaf.position.set(x + dx * scale, dy * scale, z + dz * scale);
+    leaf.scale.set(0.72, 1.5, 0.72);
+    scene.add(leaf);
+  }
+}
 
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  const screenMaterial = new THREE.MeshBasicMaterial({ map: texture });
-  screenMaterials.push(screenMaterial);
-  const display = new THREE.Mesh(new THREE.PlaneGeometry(1.32, 0.84), screenMaterial);
-  display.position.set(0, 2.2, -3.29);
-  display.userData.demoScreen = true;
-  screenMeshes.push(display);
-  scene.add(display);
-
-  const glow = new THREE.PointLight(0x9bbef8, 5, 3.5, 2);
-  glow.position.set(0, 2.2, -2.9);
+function buildFloorLamp(x, z) {
+  addCylinder([x, 0.78, z], 0.07, 1.56, 0x574737);
+  addCylinder([x, 0.08, z], 0.34, 0.16, 0x574737);
+  addCone([x, 1.82, z], 0.32, 0.45, 0xe9c99a);
+  const glow = new THREE.PointLight(0xffbd72, 12, 5, 2);
+  glow.position.set(x, 1.57, z);
   scene.add(glow);
+}
+
+function buildDecor() {
+  const rug = addBox([0, 0.035, -2.65], [4.6, 0.07, 3.1], 0x725d67);
+  rug.material.roughness = 0.95;
+  addBox([0, 0.076, -2.65], [4.3, 0.012, 2.8], 0x9a7978);
+
+  addBox([-4.25, 0.22, -2.15], [2.25, 0.36, 3.25], 0x654d45);
+  addBox([-4.25, 0.48, -2.12], [2.18, 0.28, 3.12], 0xe8dfcf);
+  addBox([-4.25, 0.65, -2.15], [2.04, 0.12, 1.95], 0x9b7480);
+  addBox([-4.25, 0.74, -1.65], [2.04, 0.1, 0.95], 0xb58d92);
+  addBox([-4.82, 0.79, -3.18], [0.72, 0.22, 0.58], 0xf1e6d5);
+  addBox([-3.78, 0.79, -3.18], [0.72, 0.22, 0.58], 0xf1e6d5);
+  addBox([-4.25, 0.85, -3.76], [2.32, 1.25, 0.16], 0x704f49);
+  addBox([-4.25, 1.48, -3.66], [1.8, 0.04, 0.04], 0xcaa77e);
+  addBox([-4.25, 0.08, -2.15], [1.7, 0.16, 1.8], 0xb58d92);
+
+  addBox([2.85, 1.02, -4.22], [2.75, 0.14, 0.92], 0x9a7050);
+  for (const x of [1.68, 4.02]) {
+    for (const z of [-4.53, -3.93]) addBox([x, 0.5, z], [0.11, 1, 0.11], 0x684b38);
+  }
+  addBox([3.62, 0.81, -4.19], [0.62, 0.28, 0.67], 0x79583f);
+  addBox([2.82, 1.13, -4.25], [0.72, 0.045, 0.08], 0x473c39, -0.08);
+  addBox([2.82, 1.48, -4.22], [0.76, 0.5, 0.06], 0x574a49);
+  addBox([2.82, 1.49, -4.18], [0.68, 0.41, 0.012], 0xc49a78);
+  addBox([2.02, 1.12, -4.12], [0.12, 0.04, 0.12], 0xe7d0a5);
+  addCone([2.02, 1.43, -4.12], 0.2, 0.3, 0xf1d4a4);
+  const deskGlow = new THREE.PointLight(0xffc879, 8, 3.4, 2);
+  deskGlow.position.set(2.02, 1.38, -4.02);
+  scene.add(deskGlow);
+  addBox([2.85, 0.48, -3.35], [0.95, 0.14, 0.92], 0x6e5a50);
+  addBox([2.85, 0.97, -3.76], [0.95, 0.9, 0.12], 0x80695d);
+  for (const x of [2.48, 3.22]) {
+    for (const z of [-3.68, -3.02]) addBox([x, 0.25, z], [0.09, 0.5, 0.09], 0x644b3e);
+  }
+
+  addBox([0.15, 0.42, -2.72], [3.05, 0.42, 0.92], 0x6f7370);
+  addBox([0.15, 0.91, -2.26], [3.05, 0.88, 0.3], 0x747b75);
+  addBox([-1.36, 0.67, -2.71], [0.32, 0.62, 0.92], 0x747b75);
+  addBox([1.66, 0.67, -2.71], [0.32, 0.62, 0.92], 0x747b75);
+  for (const x of [-0.77, 0.15, 1.07]) {
+    addSoftCushion([x, 0.71, -2.96], [0.43, 0.14, 0.35], 0x898e85);
+  }
+  addSoftCushion([-0.84, 0.98, -2.04], [0.48, 0.26, 0.14], 0xc58e82);
+  addSoftCushion([0.15, 0.98, -2.04], [0.48, 0.26, 0.14], 0x899186);
+  addSoftCushion([1.14, 0.98, -2.04], [0.48, 0.26, 0.14], 0xd2b78e);
+  for (const x of [-1.12, 1.42]) {
+    for (const z of [-3.03, -2.41]) addBox([x, 0.16, z], [0.12, 0.32, 0.12], 0x574737);
+  }
+
+  addBox([0.05, 0.51, -1.55], [1.72, 0.12, 0.88], 0x9a7050);
+  for (const x of [-0.62, 0.72]) {
+    for (const z of [-1.85, -1.25]) addBox([x, 0.26, z], [0.09, 0.5, 0.09], 0x684b38);
+  }
+  addBox([-0.36, 0.59, -1.55], [0.52, 0.08, 0.36], 0xb17d65);
+  addBox([-0.36, 0.65, -1.55], [0.42, 0.035, 0.31], 0xd8b793);
+  addCylinder([0.42, 0.7, -1.61], 0.1, 0.18, 0xe7d6bd);
+
+  addBox([4.12, 0.42, -2.25], [1.25, 0.36, 1.18], 0x9a7061, -0.2);
+  addBox([4.12, 0.95, -1.79], [1.25, 1.02, 0.3], 0x9a7061, -0.2);
+  addSoftCushion([4.12, 0.68, -2.25], [0.52, 0.17, 0.5], 0xb38573);
+  addSoftCushion([4.12, 1, -1.94], [0.48, 0.4, 0.16], 0xb38573);
+  addBox([3.46, 0.68, -2.25], [0.18, 0.58, 1.14], 0x9a7061, -0.2);
+  addBox([4.78, 0.68, -2.25], [0.18, 0.58, 1.14], 0x9a7061, -0.2);
+  addCylinder([4.12, 0.24, -3.3], 0.48, 0.12, 0x9a7050);
+  addCylinder([4.12, 0.13, -3.3], 0.08, 0.22, 0x684b38);
+
+  addBox([-4.25, 2.32, -4.91], [1.6, 1.15, 0.1], 0xd9c5a4);
+  addBox([-4.25, 2.32, -4.84], [1.42, 0.97, 0.04], 0x829083);
+  addBox([-4.25, 2.21, -4.81], [0.06, 0.62, 0.025], 0xd7b994);
+  addBox([-4.08, 2.46, -4.81], [0.32, 0.42, 0.025], 0xd7b994, 0.3);
+  addBox([-4.42, 2.57, -4.81], [0.32, 0.34, 0.025], 0xc58e82, -0.35);
+  buildFloorLamp(-2.45, -1.8);
+  buildPlant(-5.15, 0.38, 1.1);
+  buildPlant(5.12, -3.85, 0.9);
+  buildPlant(1.75, 0.25, 0.75);
 }
 
 function resizeRenderer() {
@@ -508,17 +569,4 @@ function onKeyDown(event) {
   if (event.key === "ArrowUp") manualPitch += amount;
   if (event.key === "ArrowDown") manualPitch -= amount;
   manualPitch = THREE.MathUtils.clamp(manualPitch, -1.45, 1.45);
-}
-
-function inspectFloatingScreen(event) {
-  if (event.target instanceof Element && event.target.closest("button")) return;
-  if (!renderer || !camera || pointerDrag) return;
-  const rect = renderer.domElement.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
-  pointerPosition.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  pointerPosition.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointerPosition, camera);
-  if (raycaster.intersectObjects(screenMeshes, false).length) {
-    diagnosticMessage.textContent = "You found the floating screen! Drag the room to look around it.";
-  }
 }

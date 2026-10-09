@@ -1,6 +1,6 @@
 # DIY VR — Step 1
 
-A small 3D room that runs in your browser. Move your phone to look around, drag with your finger or mouse, or switch on a side-by-side view for a two-lens headset. The scene is rendered on the phone, not the Windows computer. After Safari has loaded the page and the local 3D library, the open demo does not need a continuing PC connection or any internet access. To open or reload the website, the phone does need to be able to reach the computer's local server.
+A cozy furnished 3D room that runs in your browser, with a bed, desk, sofa, reading chair, plants, and warm lamps. Move your phone to look around, drag with your finger or mouse, or switch on a side-by-side view for a two-lens headset. The scene is rendered on the phone, not the Windows computer. After Safari has loaded the page and the local 3D library, the open demo does not need a continuing PC connection or any internet access. To open or reload the website, the phone does need to be able to reach the computer's local server.
 
 The app uses Three.js 0.160.1, downloaded once by npm and served from your own computer when testing locally. The GitHub Pages workflow bundles it for publishing. It does not use a paid service, an external 3D API, or a PC companion app.
 
@@ -33,7 +33,7 @@ The iPhone 7 supports up to iOS 15.8.x. Apple requires a user gesture to request
    ```
 
 6. Open the `http://localhost:8080` address printed in the terminal on your computer. Keep this terminal and server running while using the app.
-7. Click **Enter the demo**, drag the scene, try the arrow keys, adjust the sensitivity, and enable **Headset view** to see the left- and right-eye images side by side.
+7. Click **Enter the demo**, drag the scene, try the arrow keys, adjust the sensitivity, and enable **Headset view** to see the left- and right-eye images side by side. Use **Phone orientation** if motion needs portrait or landscape adjustment, and **Full screen** to expand the demo.
 8. Click **Home** to return to the first screen. Press **Ctrl+C** in the terminal when you are finished.
 
 There is no separate compile or build command.
@@ -145,7 +145,7 @@ mkcert installs a development root certificate on **your PC** and the separate r
 
 ## Test checklist
 
-- **3D room:** The scene contains a walkable-looking room with a floor grid, walls, colorful objects, and a floating “HELLO, WORLD” virtual display. Click/tap it to see a small confirmation in the diagnostic. Drag inside the scene to look around; arrow keys also work on a keyboard.
+- **3D room:** The furnished room keeps its original floor and walls and adds a bed, desk and chair, sofa, reading chair, coffee table, plants, wall art, and warm lamps. Drag inside the scene to look around; arrow keys also work on a keyboard.
 - **Single-screen mode:** Leave **Headset view** turned off.
 - **Stereoscopic mode:** Turn **Headset view** on. The app switches to a full-screen room drawn as two adjacent half-width camera views; `LEFT EYE` and `RIGHT EYE` labels identify them. `Recenter` and `Exit headset view` remain available as floating controls. Place the phone screen horizontally in your two-lens headset and center the seam between the lenses. Adjust headset straps/spacing for comfort. Exit to return to one view and the settings.
 - **Motion tracking:** On iPhone Safari, open the trusted HTTPS address and tap **Enable motion** (this button supplies the required iOS permission gesture). Accept the permission prompt. The indicator should say **MOTION ON**, and α/β/γ should change as you rotate the phone. Use **Recenter your view** to set the current phone direction as forward.

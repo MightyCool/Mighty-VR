@@ -69,8 +69,12 @@
         <header class="demo-header">
           <button class="text-button" id="home-button" type="button">← <span>Home</span></button>
           <div class="demo-title"><span class="brand-mark">◉</span> DIY VR <span class="title-divider">/</span> ROOM 01</div>
-          <button class="text-button recenter-top" id="recenter-top" type="button" aria-label="Recenter view">◎ <span>Recenter</span></button>
+          <div class="header-actions">
+            <button class="text-button" id="fullscreen-button" type="button" aria-label="Enter full screen">⛶ <span>Full screen</span></button>
+            <button class="text-button recenter-top" id="recenter-top" type="button" aria-label="Recenter view">◎ <span>Recenter</span></button>
+          </div>
         </header>
+        <p class="fullscreen-status" id="fullscreen-status" role="status" aria-live="polite" hidden></p>
 
         <div class="scene-stage" id="scene-stage">
           <div class="render-labels" id="render-labels" hidden>
@@ -105,6 +109,15 @@
           <label class="toggle-row" for="stereo-toggle">
             <span><strong>Headset view</strong><small>Show left and right eye side by side</small></span>
             <span class="toggle-control"><input id="stereo-toggle" type="checkbox" /><span aria-hidden="true"></span></span>
+          </label>
+
+          <label class="orientation-row" for="motion-orientation">
+            <span><strong>Phone orientation</strong><small>Choose how motion follows your screen</small></span>
+            <select id="motion-orientation">
+              <option value="auto">Auto</option>
+              <option value="portrait">Portrait</option>
+              <option value="landscape">Landscape</option>
+            </select>
           </label>
 
           <label class="sensitivity-row" for="sensitivity">
