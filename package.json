@@ -1,0 +1,19 @@
+{
+  "name": "diy-vr",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A standalone browser-based stereoscopic VR demo for desktop and iPhone.",
+  "type": "module",
+  "scripts": {
+    "build": "vite build --base=./",
+    "start": "node server.js",
+    "start:https": "node server.js --https",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "0.160.1"
+  },
+  "devDependencies": {
+    "vite": "^8.3.4"
+  }
+}

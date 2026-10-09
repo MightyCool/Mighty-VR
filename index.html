@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#101319" />
+    <meta
+      name="description"
+      content="A simple stereoscopic VR room and motion-tracking demo for your iPhone."
+    />
+    <title>DIY VR — Your own little world</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./src/main.js"></script>
+  </head>
+  <body>
+    <main>
+      <section class="home-screen" id="home-screen" aria-labelledby="home-title">
+        <div class="home-nav">
+          <a class="brand" href="./" aria-label="DIY VR home"><span class="brand-mark">◉</span> DIY VR</a>
+          <span class="nav-note">A little world of your own</span>
+        </div>
+
+        <div class="hero">
+          <div class="hero-copy">
+            <div class="eyebrow"><span class="eyebrow-dot"></span> YOUR FIRST STEP INTO VR</div>
+            <h1 id="home-title">A new point<br />of <span>view.</span></h1>
+            <p class="hero-description">
+              Step inside a small, colorful 3D world. Look around on your phone, or split the view
+              for your DIY headset.
+            </p>
+            <button class="primary-button" id="launch-button" type="button">
+              <span>Enter the demo</span><span aria-hidden="true">↗</span>
+            </button>
+            <p class="hero-footnote">Made for your screen. No headset required to try it.</p>
+          </div>
+
+          <div class="preview-card" aria-label="Preview of the colorful 3D VR room">
+            <div class="preview-glow"></div>
+            <div class="preview-room">
+              <div class="preview-wall"></div>
+              <div class="preview-window"><span></span></div>
+              <div class="preview-ball"></div>
+              <div class="preview-cube"></div>
+              <div class="preview-floor"></div>
+              <div class="preview-plinth"></div>
+            </div>
+            <div class="preview-caption"><span></span> A room that fits in your pocket</div>
+            <div class="preview-index">001&nbsp; / &nbsp;WELCOME</div>
+          </div>
+        </div>
+
+        <div class="feature-strip" aria-label="Demo features">
+          <div class="feature">
+            <span class="feature-icon">⌖</span>
+            <span><strong>Look around</strong><small>Move your phone or drag</small></span>
+          </div>
+          <div class="feature">
+            <span class="feature-icon">◫</span>
+            <span><strong>Headset ready</strong><small>Optional split-screen view</small></span>
+          </div>
+          <div class="feature">
+            <span class="feature-icon">◎</span>
+            <span><strong>All yours</strong><small>A tiny world, right here</small></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="demo-screen" id="demo-screen" aria-label="DIY VR 3D room" hidden>
+        <header class="demo-header">
+          <button class="text-button" id="home-button" type="button">← <span>Home</span></button>
+          <div class="demo-title"><span class="brand-mark">◉</span> DIY VR <span class="title-divider">/</span> ROOM 01</div>
+          <button class="text-button recenter-top" id="recenter-top" type="button" aria-label="Recenter view">◎ <span>Recenter</span></button>
+        </header>
+
+        <div class="scene-stage" id="scene-stage">
+          <div class="render-labels" id="render-labels" hidden>
+            <span>LEFT EYE</span><span>RIGHT EYE</span>
+          </div>
+          <div class="stereo-actions" id="stereo-actions" hidden>
+            <button class="stereo-action" id="stereo-recenter" type="button">◎ Recenter</button>
+            <button class="stereo-action" id="stereo-exit" type="button">× Exit headset view</button>
+          </div>
+          <div class="scene-message" id="scene-message" role="status" hidden></div>
+          <div class="crosshair" id="crosshair" aria-hidden="true">+</div>
+        </div>
+
+        <aside class="control-panel" aria-label="Demo settings">
+          <div class="panel-heading">
+            <div><span class="panel-kicker">YOUR VIEW</span><h2>Make it yours</h2></div>
+            <span class="live-indicator" id="motion-indicator"><span></span> MOTION OFF</span>
+          </div>
+
+          <div class="motion-card">
+            <div class="motion-copy">
+              <strong>Phone motion</strong>
+              <span id="motion-help">Enable motion to look around by moving your iPhone.</span>
+            </div>
+            <button class="secondary-button" id="motion-button" type="button">Enable motion</button>
+          </div>
+
+          <div class="diagnostic" id="motion-diagnostic" role="status" aria-live="polite">
+            <span class="diagnostic-light"></span><span id="diagnostic-message">Motion tracking is off. Drag the scene to look around.</span>
+          </div>
+
+          <label class="toggle-row" for="stereo-toggle">
+            <span><strong>Headset view</strong><small>Show left and right eye side by side</small></span>
+            <span class="toggle-control"><input id="stereo-toggle" type="checkbox" /><span aria-hidden="true"></span></span>
+          </label>
+
+          <label class="sensitivity-row" for="sensitivity">
+            <span><strong>Look sensitivity</strong><output id="sensitivity-value" for="sensitivity">1.0×</output></span>
+            <input id="sensitivity" type="range" min="0.4" max="2" step="0.1" value="1" />
+            <span class="range-labels"><small>Gentle</small><small>Quick</small></span>
+          </label>
+
+          <p class="control-hint">Drag to look around <span>·</span> Arrow keys work on desktop too</p>
+          <button class="recenter-button" id="recenter-button" type="button">◎ <span>Recenter your view</span></button>
+        </aside>
+        <p class="demo-footer">A small room to explore. This demo runs right in your browser.</p>
+      </section>
+    </main>
+  </body>
+</html>
