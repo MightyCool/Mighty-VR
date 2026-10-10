@@ -682,10 +682,12 @@ input:focus-visible {
 
 .hand-camera-source {
   position: fixed;
-  z-index: -1;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
+  z-index: 0;
+  left: -2px;
+  bottom: 0;
+  width: 2px;
+  height: 2px;
+  opacity: 0.01;
   pointer-events: none;
 }
 

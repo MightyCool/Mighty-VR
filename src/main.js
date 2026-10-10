@@ -32,11 +32,11 @@ let HandLandmarkerClass;
 let handStream;
 let handVideo;
 let handTrackingActive = false;
+let handVideoPlaybackPending = false;
 let lastHandFrameTime = 0;
 let handWasPinching = false;
 let handRig;
 let handJoints = [];
-let handBones;
 let handCursor;
 let handLauncher;
 let handMenu;
@@ -45,6 +45,13 @@ let handMenuContext;
 let handMenuTexture;
 let handMenuOpen = false;
 let handLauncherShown = false;
+let handTouchTarget = null;
+let handTouchStartedAt = 0;
+let handTouchActivated = false;
+let handHoveredTarget = null;
+let handPalm;
+let handSegments = [];
+let handNails = [];
 let orientationAvailable = typeof window.DeviceOrientationEvent === "function";
 let orientationState = "off";
 let currentOrientation = null;
@@ -132,7 +139,12 @@ document.querySelector("#stereo-recenter").addEventListener("click", recenterVie
 fullscreenButton.addEventListener("click", toggleFullscreen);
 document.addEventListener("fullscreenchange", updateFullscreenButton);
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) stopHandTracking();
+  if (!document.hidden && handTrackingActive && handVideo?.paused && !handVideoPlaybackPending) {
+    playHandVideo().catch((error) => {
+      console.error("Unable to resume hand-tracking video:", error);
+      handTrackingStatus.textContent = "Camera video paused. Tap Stop hand tracking, then enable it again.";
+    });
+  }
 });
 motionOrientation.addEventListener("change", refreshScreenOrientation);
 window.screen?.orientation?.addEventListener("change", refreshScreenOrientation);
@@ -353,21 +365,39 @@ function createScene() {
 
 function buildHandOverlay() {
   handRig = new THREE.Group();
-  const boneGeometry = new THREE.BufferGeometry();
-  boneGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(handConnections.length * 6), 3));
-  const boneMaterial = new THREE.LineBasicMaterial({ color: 0xb9f3d4, linewidth: 2, depthTest: false });
-  handBones = new THREE.LineSegments(boneGeometry, boneMaterial);
-  handRig.add(handBones);
-  handRig.renderOrder = 9;
+  const handMaterial = new THREE.MeshStandardMaterial({
+    color: 0xd7a986,
+    roughness: 0.58,
+    depthTest: false,
+  });
+  const segmentGeometry = new THREE.CylinderGeometry(1, 1, 1, 10);
+  handSegments = handConnections.map(([start, end]) => {
+    const segment = new THREE.Mesh(segmentGeometry, handMaterial);
+    segment.userData.landmarkPair = [start, end];
+    handRig.add(segment);
+    return segment;
+  });
 
-  const jointGeometry = new THREE.SphereGeometry(0.018, 8, 6);
-  const jointMaterial = new THREE.MeshBasicMaterial({ color: 0xe7fff1, depthTest: false });
+  handPalm = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), handMaterial);
+  handRig.add(handPalm);
+
+  const jointGeometry = new THREE.SphereGeometry(1, 10, 8);
+  const jointMaterial = new THREE.MeshStandardMaterial({ color: 0xe2b99a, roughness: 0.55, depthTest: false });
   handJoints = Array.from({ length: 21 }, () => {
     const joint = new THREE.Mesh(jointGeometry, jointMaterial);
     handRig.add(joint);
     return joint;
   });
+  const nailGeometry = new THREE.SphereGeometry(1, 8, 6);
+  const nailMaterial = new THREE.MeshStandardMaterial({ color: 0xf1d6c2, roughness: 0.48, depthTest: false });
+  handNails = [4, 8, 12, 16, 20].map((index) => {
+    const nail = new THREE.Mesh(nailGeometry, nailMaterial);
+    nail.userData.landmarkIndex = index;
+    handRig.add(nail);
+    return nail;
+  });
   handRig.visible = false;
+  handRig.renderOrder = 15;
   scene.add(handRig);
 
   handCursor = new THREE.Mesh(
@@ -375,7 +405,7 @@ function buildHandOverlay() {
     new THREE.MeshBasicMaterial({ color: 0xffd17c }),
   );
   handCursor.visible = false;
-  handCursor.renderOrder = 12;
+  handCursor.renderOrder = 16;
   scene.add(handCursor);
 
   const launcherCanvas = document.createElement("canvas");
@@ -476,11 +506,15 @@ async function startHandTracking() {
     handVideo.autoplay = true;
     handVideo.muted = true;
     handVideo.playsInline = true;
+    handVideo.setAttribute("autoplay", "");
+    handVideo.setAttribute("muted", "");
+    handVideo.setAttribute("playsinline", "");
+    handVideo.setAttribute("webkit-playsinline", "");
     handVideo.setAttribute("aria-hidden", "true");
     handVideo.className = "hand-camera-source";
     handVideo.srcObject = handStream;
     document.body.append(handVideo);
-    await handVideo.play();
+    await playHandVideo();
 
     startupStep = "loading the hand-tracking library";
     if (!HandLandmarkerClass) {
@@ -522,6 +556,64 @@ async function startHandTracking() {
   }
 }
 
+async function playHandVideo() {
+  if (handVideoPlaybackPending) return;
+  const video = handVideo;
+  const stream = handStream;
+  if (!video || !stream) throw new Error("The camera video stream is no longer available.");
+
+  handVideoPlaybackPending = true;
+  try {
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (handVideo !== video || handStream !== stream) {
+        throw new Error("Camera startup was cancelled.");
+      }
+      if (stream.getVideoTracks().every((track) => track.readyState !== "live")) {
+        throw new Error("The camera stopped before video playback began.");
+      }
+      try {
+        await video.play();
+        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        await waitForHandVideoFrame(video);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (error.name !== "AbortError" || attempt === 2) throw error;
+        await new Promise((resolve) => window.setTimeout(resolve, 180 * (attempt + 1)));
+      }
+    }
+    throw lastError || new Error("Safari could not start camera video.");
+  } finally {
+    handVideoPlaybackPending = false;
+  }
+}
+
+function waitForHandVideoFrame(video) {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Safari started the camera but did not provide a video frame."));
+    }, 8000);
+    const onReady = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(video.error || new Error("Safari could not read a camera frame."));
+    };
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      video.removeEventListener("loadeddata", onReady);
+      video.removeEventListener("error", onError);
+    };
+    video.addEventListener("loadeddata", onReady);
+    video.addEventListener("error", onError);
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) onReady();
+  });
+}
+
 function getHandTrackingErrorMessage(error, startupStep) {
   if (error.name === "NotAllowedError" || error.name === "SecurityError") {
     return "Safari did not grant camera access. Check Settings → Safari → Camera and this site's permission, then reload.";
@@ -531,6 +623,9 @@ function getHandTrackingErrorMessage(error, startupStep) {
   }
   if (error.name === "NotReadableError") {
     return "The camera is busy in another app. Close that app and try again.";
+  }
+  if (error.name === "AbortError" && startupStep === "starting the camera video") {
+    return "Safari interrupted camera video startup. Keep this page open, close other camera apps, then try again.";
   }
   if (error.name === "NotSupportedError" || error.name === "CompileError") {
     return "This Safari version could not initialize the hand-tracking runtime. Reload the page and try again.";
@@ -570,6 +665,10 @@ function resetHandOverlays() {
   handLauncherShown = false;
   handMenuOpen = false;
   handWasPinching = false;
+  handTouchTarget = null;
+  handTouchStartedAt = 0;
+  handTouchActivated = false;
+  handHoveredTarget = null;
 }
 
 function updateHandTracking() {
@@ -587,6 +686,7 @@ function updateHandTracking() {
       handRig.visible = false;
       handCursor.visible = false;
       handWasPinching = false;
+      updateHandTouch(null, 0, now);
       handTrackingStatus.textContent = "Looking for a hand. Move it into the rear camera view.";
       return;
     }
@@ -599,9 +699,15 @@ function updateHandTracking() {
     const palmSize = Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
     const pinchDistance = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y);
     const isPinching = palmSize > 0 && pinchDistance / palmSize < 0.34;
-    if (isPinching && !handWasPinching) handleHandPinch(landmarks[8].x, landmarks[8].y);
+    const fingertip = landmarks[8];
+    const touchTarget = getHandTouchTarget(fingertip.x, fingertip.y);
+    updateHandTouch(touchTarget, fingertip.x, now);
+    if (isPinching && !handWasPinching) handleHandPinch(fingertip.x, fingertip.y);
     handWasPinching = isPinching;
     handCursor.scale.setScalar(isPinching ? 1.5 : 1);
+    handCursor.material.color.set(
+      handTouchTarget && handTouchActivated ? 0x6de0a0 : isPinching ? 0xffd17c : 0xb9f3d4,
+    );
   } catch (error) {
     console.error("Hand tracking frame failed:", error);
     handTrackingActive = false;
@@ -620,20 +726,35 @@ function screenPointToWorld(x, y, depth, zOffset = 0) {
 }
 
 function updateHandPose(landmarks) {
-  const positions = handBones.geometry.attributes.position;
   const points = landmarks.map((landmark) =>
     screenPointToWorld(landmark.x, landmark.y, 1.2, landmark.z * 0.35).clone(),
   );
+  const handWidth = Math.max(points[5].distanceTo(points[17]), points[0].distanceTo(points[9]) * 0.55);
   for (let i = 0; i < handJoints.length; i += 1) {
     handJoints[i].position.copy(points[i]);
+    handJoints[i].scale.setScalar(handWidth * (i === 0 ? 0.105 : 0.09));
   }
-  let offset = 0;
-  for (const [start, end] of handConnections) {
-    positions.setXYZ(offset++, points[start].x, points[start].y, points[start].z);
-    positions.setXYZ(offset++, points[end].x, points[end].y, points[end].z);
+
+  for (const segment of handSegments) {
+    const [start, end] = segment.userData.landmarkPair;
+    const direction = points[end].clone().sub(points[start]);
+    const length = direction.length();
+    segment.position.copy(points[start]).add(points[end]).multiplyScalar(0.5);
+    segment.quaternion.setFromUnitVectors(WORLD_UP, direction.normalize());
+    const radiusScale = start === 0 || end === 0 ? 0.075 : 0.055;
+    segment.scale.set(handWidth * radiusScale, length, handWidth * radiusScale);
   }
-  positions.needsUpdate = true;
-  handBones.geometry.computeBoundingSphere();
+
+  handPalm.position.copy(points[0]).add(points[5]).add(points[9]).add(points[13]).add(points[17]).multiplyScalar(0.2);
+  handPalm.scale.set(handWidth * 0.46, points[0].distanceTo(points[9]) * 0.58, handWidth * 0.16);
+  handPalm.quaternion.copy(camera.quaternion);
+
+  for (const nail of handNails) {
+    const index = nail.userData.landmarkIndex;
+    nail.position.copy(points[index]).add(points[index].clone().sub(points[index - 1]).normalize().multiplyScalar(handWidth * 0.035));
+    nail.scale.set(handWidth * 0.065, handWidth * 0.095, handWidth * 0.018);
+  }
+
   handCursor.position.copy(points[8]);
 
   if (handLauncherShown) {
@@ -655,38 +776,79 @@ function handleHandPinch(x, y) {
     return;
   }
 
+  const target = getHandTouchTarget(x, y);
+  activateHandTarget(target, x);
+}
+
+function getMenuScreenBounds() {
+  const depth = 1.25;
+  const viewHeight = 2 * depth * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const viewWidth = viewHeight * camera.aspect;
+  const width = handMenu.geometry.parameters.width / viewWidth;
+  const height = handMenu.geometry.parameters.height / viewHeight;
+  return { left: 0.5 - width / 2, right: 0.5 + width / 2, top: 0.51 - height / 2, bottom: 0.51 + height / 2 };
+}
+
+function getHandTouchTarget(x, y) {
+  if (!handLauncherShown) return null;
   if (!handMenuOpen) {
-    if (x >= 0.66 && x <= 0.92 && y >= 0.12 && y <= 0.28) {
-      handMenuOpen = true;
-      handLauncher.visible = false;
-      handMenu.visible = true;
+    return x >= 0.66 && x <= 0.92 && y >= 0.12 && y <= 0.28 ? "launcher" : null;
+  }
+
+  const bounds = getMenuScreenBounds();
+  if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return null;
+  const canvasX = ((x - bounds.left) / (bounds.right - bounds.left)) * handMenuCanvas.width;
+  const canvasY = ((y - bounds.top) / (bounds.bottom - bounds.top)) * handMenuCanvas.height;
+  if ((canvasY <= 92 && canvasX >= 420) || canvasY >= 570) return "close";
+  if (canvasY >= 112 && canvasY <= 218) return canvasX < 256 ? "sensitivity-down" : "sensitivity-up";
+  if (canvasY >= 236 && canvasY <= 330) return "orientation";
+  if (canvasY >= 348 && canvasY <= 442) return "stereo";
+  if (canvasY >= 460 && canvasY <= 554) return "recenter";
+  return null;
+}
+
+function updateHandTouch(target, x, now) {
+  if (target !== handTouchTarget) {
+    handTouchTarget = target;
+    handTouchStartedAt = now;
+    handTouchActivated = false;
+    if (handHoveredTarget !== target) {
+      handHoveredTarget = target;
+      if (handMenuOpen) drawHandMenu();
     }
     return;
   }
+  if (!target || handTouchActivated || now - handTouchStartedAt < 350) return;
+  handTouchActivated = true;
+  activateHandTarget(target, x);
+}
 
-  const panelWidth = 0.46;
-  const panelHeight = 0.64;
-  const left = 0.5 - panelWidth / 2;
-  const top = 0.51 - panelHeight / 2;
-  if (x < left || x > left + panelWidth || y < top || y > top + panelHeight) return;
-  const canvasX = ((x - left) / panelWidth) * handMenuCanvas.width;
-  const canvasY = ((y - top) / panelHeight) * handMenuCanvas.height;
-  if (canvasY < 88) {
+function activateHandTarget(target, x) {
+  if (target === "launcher") {
+    handMenuOpen = true;
+    handLauncher.visible = false;
+    handMenu.visible = true;
+    drawHandMenu();
+    return;
+  }
+  if (!target) return;
+
+  if (target === "close") {
     handMenuOpen = false;
     handMenu.visible = false;
     handLauncher.visible = true;
-  } else if (canvasY < 225) {
-    const amount = canvasX < handMenuCanvas.width / 2 ? -0.1 : 0.1;
+  } else if (target === "sensitivity-down" || target === "sensitivity-up") {
+    const amount = target === "sensitivity-down" ? -0.1 : 0.1;
     sensitivitySlider.value = String(THREE.MathUtils.clamp(sensitivity + amount, 0.4, 2));
     sensitivitySlider.dispatchEvent(new Event("input", { bubbles: true }));
-  } else if (canvasY < 345) {
+  } else if (target === "orientation") {
     const nextMode = { auto: "portrait", portrait: "landscape", landscape: "auto" }[motionOrientation.value];
     motionOrientation.value = nextMode;
     motionOrientation.dispatchEvent(new Event("change", { bubbles: true }));
-  } else if (canvasY < 465) {
+  } else if (target === "stereo") {
     stereoToggle.checked = !stereoToggle.checked;
     stereoToggle.dispatchEvent(new Event("change", { bubbles: true }));
-  } else {
+  } else if (target === "recenter") {
     recenterView();
   }
   drawHandMenu();
@@ -707,19 +869,21 @@ function drawHandMenu() {
   context.fillStyle = "#b9f3d4";
   context.font = "600 38px sans-serif";
   context.fillText("MVR  ·  ROOM SETTINGS", 256, 58);
+  context.font = "600 34px sans-serif";
+  context.fillText("×", 464, 56);
   context.font = "22px sans-serif";
-  drawHandMenuButton(context, 34, 112, 444, 106, `Sensitivity    −   ${sensitivity.toFixed(1)}×   +`);
-  drawHandMenuButton(context, 34, 236, 444, 94, `Orientation    ${motionOrientation.value}`);
-  drawHandMenuButton(context, 34, 348, 444, 94, `Headset view    ${stereoToggle.checked ? "ON" : "OFF"}`);
-  drawHandMenuButton(context, 34, 460, 444, 94, "Recenter view");
+  drawHandMenuButton(context, 34, 112, 444, 106, `Sensitivity    −   ${sensitivity.toFixed(1)}×   +`, handHoveredTarget?.startsWith("sensitivity"));
+  drawHandMenuButton(context, 34, 236, 444, 94, `Orientation    ${motionOrientation.value}`, handHoveredTarget === "orientation");
+  drawHandMenuButton(context, 34, 348, 444, 94, `Headset view    ${stereoToggle.checked ? "ON" : "OFF"}`, handHoveredTarget === "stereo");
+  drawHandMenuButton(context, 34, 460, 444, 94, "Recenter view", handHoveredTarget === "recenter");
   context.fillStyle = "#b8b9c4";
   context.font = "18px sans-serif";
-  context.fillText("Pinch a control · Pinch here to close", 256, 594);
+  context.fillText("Touch or pinch a control · Touch here to close", 256, 594);
   handMenuTexture.needsUpdate = true;
 }
 
-function drawHandMenuButton(context, x, y, width, height, label) {
-  context.fillStyle = "#292d39";
+function drawHandMenuButton(context, x, y, width, height, label, hovered = false) {
+  context.fillStyle = hovered ? "#3d5148" : "#292d39";
   roundedRectPath(context, x, y, width, height, 18);
   context.fill();
   context.strokeStyle = "#ffffff30";
