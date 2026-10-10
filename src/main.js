@@ -55,6 +55,8 @@ let handUiTexture;
 let handUiMode = "closed";
 let handUiWidth = 1.2;
 let handUiHeight = 0.96;
+let handAppScaleStep = 0;
+let handBrowserQuery = "";
 let lastHandUiActivation = "";
 let lastHandUiActivationAt = 0;
 let passthroughEnabled = false;
@@ -869,6 +871,7 @@ function resetHandOverlays() {
   handUiPanel?.scale.set(1, 1, 1);
   handUiWidth = 1.2;
   handUiHeight = 0.96;
+  handAppScaleStep = 0;
   drawHandUi();
 }
 
@@ -1011,7 +1014,7 @@ function processHandLandmarks(hands, handedness, now) {
       state.releaseFrames = 0;
       if (state.fistFrames >= 2 && !state.wasFist) {
         state.wasFist = true;
-        activateHandTarget("toggle-dock", now, state);
+        if (handUiMode === "closed") activateHandTarget("toggle-dock", now, state);
       }
     } else {
       state.fistFrames = 0;
@@ -1021,7 +1024,7 @@ function processHandLandmarks(hands, handedness, now) {
 
     const touchTarget = getHandTouchTarget(state, state.points[8]);
     updateHandTouch(state, touchTarget, now);
-    if (isPinching && !state.wasPinching) {
+    if (isPinching && !state.wasPinching && !state.requiresRelease) {
       if (touchTarget && !state.touchActivated) {
         state.touchActivated = true;
         activateHandTarget(touchTarget, now, state);
@@ -1037,7 +1040,7 @@ function processHandLandmarks(hands, handedness, now) {
   }
 
   const status = visibleHands
-    ? `${visibleHands} hand${visibleHands === 1 ? "" : "s"} tracked. Curl your four fingers, leaving your thumb out, to open the floating dock.`
+    ? `${visibleHands} hand${visibleHands === 1 ? "" : "s"} tracked. Curl your four fingers, leaving your thumb out, to open the dock; choose Close Menu to close it.`
     : "Looking for hands. Move one or both into the rear camera view.";
   if (handTrackingStatus.textContent !== status) handTrackingStatus.textContent = status;
 }
@@ -1172,21 +1175,44 @@ function getHandTouchTarget(state, fingertip) {
   handUiPanel.worldToLocal(handPanelPoint);
   if (
     Math.abs(handPanelPoint.z) > 0.15 ||
-    Math.abs(handPanelPoint.x) > handUiWidth / 2 ||
-    Math.abs(handPanelPoint.y) > handUiHeight / 2
+    Math.abs(handPanelPoint.x) > 0.6 ||
+    Math.abs(handPanelPoint.y) > 0.48
   ) {
     return null;
   }
-  const x = (handPanelPoint.x / handUiWidth + 0.5) * handUiCanvas.width;
-  const y = (0.5 - handPanelPoint.y / handUiHeight) * handUiCanvas.height;
+  const x = (handPanelPoint.x / 1.2 + 0.5) * handUiCanvas.width;
+  const y = (0.5 - handPanelPoint.y / 0.96) * handUiCanvas.height;
   if (handUiMode === "dock") {
-    if (x >= 700 && y >= 250 && y <= 390) return "dock-close";
-    if (x >= 305 && x <= 470 && y >= 240 && y <= 400) return "app-settings";
-    if (x >= 480 && x <= 650 && y >= 240 && y <= 400) return "dock-passthrough";
+    if (y < 245 || y > 410) return null;
+    if (x >= 265 && x <= 375) return "app-settings";
+    if (x >= 385 && x <= 495) return "dock-passthrough";
+    if (x >= 505 && x <= 615) return "app-browser";
+    if (x >= 625 && x <= 735) return "app-close-menu";
     return null;
   }
-  if (x >= 715 && y <= 95) return "settings-close";
+  if (x >= 650 && x <= 720 && y <= 95) return "app-resize";
+  if (x >= 720 && y <= 95) return "settings-close";
   if (x <= 165 && y <= 100) return "settings-back";
+  if (handUiMode === "browser") {
+    if (y >= 120 && y <= 195) return "browser-open";
+    if (y >= 205 && y <= 265) {
+      if (x >= 34 && x < 278) return "browser-google";
+      if (x >= 278 && x < 522) return "browser-youtube";
+      if (x >= 522 && x <= 766) return "browser-wikipedia";
+    }
+    if (y >= 300 && y <= 345) return getBrowserKeyTarget(x, y, "qwertyuiop", 80, 56, 8);
+    if (y >= 350 && y <= 395) return getBrowserKeyTarget(x, y, "asdfghjkl", 112, 56, 8);
+    if (y >= 400 && y <= 445) {
+      if (x >= 650 && x <= 760) return "browser-backspace";
+      return getBrowserKeyTarget(x, y, "zxcvbnm", 168, 56, 8);
+    }
+    if (y >= 450 && y <= 510) {
+      if (x >= 110 && x < 230) return "browser-clear";
+      if (x >= 250 && x < 550) return "browser-space";
+      if (x >= 570 && x < 720) return "browser-open";
+    }
+    return null;
+  }
   if (y >= 120 && y <= 200) return "setting-motion";
   if (y >= 205 && y <= 285) return "setting-tracking";
   if (y >= 290 && y <= 370) return "setting-display";
@@ -1224,11 +1250,39 @@ function activateHandTarget(target, now = performance.now(), state = null) {
   lastHandUiActivationAt = now;
   const previousMode = handUiMode;
   if (target === "toggle-dock") {
-    setHandUiMode(handUiMode === "closed" ? "dock" : "closed", state);
-  } else if (target === "dock-close" || target === "settings-close") {
+    if (handUiMode === "closed") setHandUiMode("dock", state);
+  } else if (target === "app-close-menu") {
     setHandUiMode("closed");
+  } else if (target === "settings-close") {
+    setHandUiMode("dock");
   } else if (target === "app-settings") {
     setHandUiMode("settings");
+  } else if (target === "app-resize") {
+    handAppScaleStep = (handAppScaleStep + 1) % 3;
+    updateHandUiPanelSize();
+    for (const state of handStates) state.requiresRelease = true;
+  } else if (target === "app-browser") {
+    setHandUiMode("browser");
+  } else if (target === "browser-open") {
+    openHandBrowserUrl(
+      handBrowserQuery.trim()
+        ? `https://www.google.com/search?q=${encodeURIComponent(handBrowserQuery.trim())}`
+        : "https://www.google.com/",
+    );
+  } else if (target === "browser-google") {
+    openHandBrowserUrl("https://www.google.com/");
+  } else if (target === "browser-youtube") {
+    openHandBrowserUrl("https://www.youtube.com/");
+  } else if (target === "browser-wikipedia") {
+    openHandBrowserUrl("https://www.wikipedia.org/");
+  } else if (target.startsWith("browser-key-")) {
+    handBrowserQuery += target.slice("browser-key-".length);
+  } else if (target === "browser-space") {
+    handBrowserQuery += " ";
+  } else if (target === "browser-backspace") {
+    handBrowserQuery = handBrowserQuery.slice(0, -1);
+  } else if (target === "browser-clear") {
+    handBrowserQuery = "";
   } else if (target === "dock-passthrough") {
     setPassthroughEnabled(!passthroughEnabled);
     drawHandUi();
@@ -1270,12 +1324,22 @@ function activateHandTarget(target, now = performance.now(), state = null) {
   drawHandUi();
 }
 
+function getBrowserKeyTarget(x, y, keys, startX, keyWidth, gap) {
+  const offset = x - startX;
+  const keyIndex = Math.floor(offset / (keyWidth + gap));
+  if (offset < 0 || keyIndex < 0 || keyIndex >= keys.length) return null;
+  if (offset % (keyWidth + gap) > keyWidth) return null;
+  return `browser-key-${keys[keyIndex]}`;
+}
+
+function openHandBrowserUrl(url) {
+  window.location.assign(url);
+}
+
 function setHandUiMode(mode, anchorState = null) {
   const openingDock = mode === "dock" && handUiMode === "closed";
   handUiMode = mode;
-  handUiWidth = mode === "dock" ? 0.9 : 1.2;
-  handUiHeight = mode === "dock" ? 0.36 : 0.96;
-  handUiPanel.scale.set(handUiWidth / 1.2, handUiHeight / 0.96, 1);
+  updateHandUiPanelSize();
   handUiPanel.visible = mode !== "closed";
   handUiPanel.updateMatrixWorld(true);
   if (openingDock) {
@@ -1293,6 +1357,14 @@ function setHandUiMode(mode, anchorState = null) {
     handUiPanel.quaternion.copy(camera.quaternion);
     handUiPanel.updateMatrixWorld(true);
   }
+}
+
+function updateHandUiPanelSize() {
+  const appScale = [1, 1.5, 2][handAppScaleStep];
+  handUiWidth = handUiMode === "dock" ? 0.9 : handUiMode === "closed" ? 1.2 : 0.8 * appScale;
+  handUiHeight = handUiMode === "dock" ? 0.36 : handUiMode === "closed" ? 0.96 : 0.64 * appScale;
+  handUiPanel.scale.set(handUiWidth / 1.2, handUiHeight / 0.96, 1);
+  handUiPanel.updateMatrixWorld(true);
 }
 
 function setPassthroughEnabled(enabled) {
@@ -1393,10 +1465,10 @@ function drawHandUi() {
     context.fillStyle = "#87909e";
     context.font = "12px sans-serif";
     context.fillText("PINCH OR TOUCH", 50, 365);
-    drawHandDockApp(context, 300, 247, "⚙", "Settings", true, "app-settings", "Room controls");
+    drawHandDockApp(context, 260, 247, "⚙", "Settings", false, "app-settings", "Room controls");
     drawHandDockApp(
       context,
-      490,
+      380,
       247,
       "◉",
       "Passthrough",
@@ -1404,10 +1476,8 @@ function drawHandUi() {
       "dock-passthrough",
       passthroughEnabled ? "Camera on" : "See your space",
     );
-    context.textAlign = "center";
-    context.font = "25px sans-serif";
-    context.fillStyle = "#f4f3f0";
-    context.fillText("×", 748, 260);
+    drawHandDockApp(context, 500, 247, "⌕", "Browser", false, "app-browser", "Google · YouTube");
+    drawHandDockApp(context, 620, 247, "×", "Close Menu", false, "app-close-menu", "Close the dock");
   } else {
     context.fillStyle = "#10141ef2";
     roundedRectPath(context, 8, 8, 784, 624, 34);
@@ -1418,11 +1488,23 @@ function drawHandUi() {
     context.font = "600 30px sans-serif";
     context.fillText("‹", 42, 56);
     context.font = "600 29px sans-serif";
-    context.fillText("Settings", 92, 56);
+    context.fillText(handUiMode === "browser" ? "Browser" : "Settings", 92, 56);
+    context.fillStyle = "#ffffff14";
+    roundedRectPath(context, 650, 25, 72, 62, 16);
+    context.fill();
+    context.textAlign = "center";
+    context.fillStyle = "#b9f3d4";
+    context.font = "13px sans-serif";
+    context.fillText(`↗ ${[1, 1.5, 2][handAppScaleStep]}×`, 686, 56);
     context.textAlign = "center";
     context.font = "30px sans-serif";
     context.fillStyle = "#f4f3f0";
     context.fillText("×", 750, 56);
+    if (handUiMode === "browser") {
+      drawBrowserApp(context);
+      handUiTexture.needsUpdate = true;
+      return;
+    }
     context.textAlign = "left";
     context.fillStyle = "#aeb4c2";
     context.font = "17px sans-serif";
@@ -1450,7 +1532,7 @@ function drawHandUi() {
 function drawHandDockApp(context, x, y, icon, label, selected, target, detail) {
   const hovered = handStates.some((state) => state.touchTarget === target);
   context.fillStyle = selected ? "#b9f3d4" : hovered ? "#e6ebf2" : "#ffffff14";
-  roundedRectPath(context, x, y, 142, 142, 36);
+  roundedRectPath(context, x, y, 108, 142, 28);
   context.fill();
   context.strokeStyle = selected || hovered ? "#ffffffb0" : "#ffffff30";
   context.lineWidth = 2;
@@ -1459,12 +1541,97 @@ function drawHandDockApp(context, x, y, icon, label, selected, target, detail) {
   context.textBaseline = "middle";
   context.fillStyle = selected ? "#19221e" : "#edf0f4";
   context.font = "42px sans-serif";
-  context.fillText(icon, x + 71, y + 54);
-  context.font = label === "Passthrough" ? "14px sans-serif" : "17px sans-serif";
-  context.fillText(label, x + 71, y + 108);
+  context.fillText(icon, x + 54, y + 48);
+  context.font = label.length > 9 ? "12px sans-serif" : "14px sans-serif";
+  context.fillText(label, x + 54, y + 93);
   context.fillStyle = selected ? "#344840" : "#abb2be";
   context.font = "11px sans-serif";
-  context.fillText(detail, x + 71, y + 130);
+  context.fillText(detail, x + 54, y + 123);
+}
+
+function drawBrowserApp(context) {
+  context.textAlign = "left";
+  context.fillStyle = "#aeb4c2";
+  context.font = "16px sans-serif";
+  context.fillText("SEARCH THE WEB", 42, 98);
+
+  context.fillStyle = "#222733";
+  roundedRectPath(context, 34, 120, 732, 75, 20);
+  context.fill();
+  context.fillStyle = handBrowserQuery ? "#f4f3f0" : "#aeb4c2";
+  context.font = "19px sans-serif";
+  const visibleQuery = handBrowserQuery || "Type a search with the keyboard";
+  context.fillText(
+    visibleQuery.length > 42 ? `${visibleQuery.slice(0, 39)}...` : visibleQuery,
+    54,
+    158,
+  );
+  context.fillStyle = "#b9f3d4";
+  roundedRectPath(context, 655, 130, 96, 54, 15);
+  context.fill();
+  context.textAlign = "center";
+  context.fillStyle = "#19221e";
+  context.font = "600 15px sans-serif";
+  context.fillText("Search", 703, 157);
+
+  drawBrowserShortcut(context, 34, "Google", "Search the web", "G", "browser-google");
+  drawBrowserShortcut(context, 278, "YouTube", "Videos", "▶", "browser-youtube");
+  drawBrowserShortcut(context, 522, "Wikipedia", "Encyclopedia", "W", "browser-wikipedia");
+
+  drawBrowserKeyboardRow(context, "qwertyuiop", 80, 300, 56, 8);
+  drawBrowserKeyboardRow(context, "asdfghjkl", 112, 350, 56, 8);
+  drawBrowserKeyboardRow(context, "zxcvbnm", 168, 400, 56, 8);
+  drawBrowserSpecialKey(context, 650, 400, 110, 45, "⌫", "browser-backspace");
+  drawBrowserSpecialKey(context, 110, 450, 120, 54, "Clear", "browser-clear");
+  drawBrowserSpecialKey(context, 250, 450, 300, 54, "Space", "browser-space");
+  drawBrowserSpecialKey(context, 570, 450, 150, 54, "Go", "browser-open");
+  context.textAlign = "center";
+  context.fillStyle = "#87909e";
+  context.font = "12px sans-serif";
+  context.fillText("Google and shortcuts open in this browser tab. Use Back to return to the dock.", 400, 565);
+}
+
+function drawBrowserShortcut(context, x, title, detail, icon, target) {
+  const hovered = handStates.some((state) => state.touchTarget === target);
+  context.fillStyle = hovered ? "#35483f" : "#222733";
+  roundedRectPath(context, x, 205, 232, 58, 16);
+  context.fill();
+  context.textAlign = "left";
+  context.fillStyle = "#b9f3d4";
+  context.font = "20px sans-serif";
+  context.fillText(icon, x + 14, 228);
+  context.fillStyle = "#f4f3f0";
+  context.font = "600 14px sans-serif";
+  context.fillText(title, x + 48, 222);
+  context.fillStyle = "#aeb4c2";
+  context.font = "12px sans-serif";
+  context.fillText(detail, x + 48, 243);
+}
+
+function drawBrowserKeyboardRow(context, keys, x, y, keyWidth, gap) {
+  for (let index = 0; index < keys.length; index += 1) {
+    const keyX = x + index * (keyWidth + gap);
+    const target = `browser-key-${keys[index]}`;
+    const hovered = handStates.some((state) => state.touchTarget === target);
+    context.fillStyle = hovered ? "#35483f" : "#222733";
+    roundedRectPath(context, keyX, y, keyWidth, 45, 10);
+    context.fill();
+    context.textAlign = "center";
+    context.fillStyle = "#f4f3f0";
+    context.font = "18px sans-serif";
+    context.fillText(keys[index].toUpperCase(), keyX + keyWidth / 2, y + 23);
+  }
+}
+
+function drawBrowserSpecialKey(context, x, y, width, height, label, target) {
+  const hovered = handStates.some((state) => state.touchTarget === target);
+  context.fillStyle = target === "browser-open" ? "#b9f3d4" : hovered ? "#35483f" : "#222733";
+  roundedRectPath(context, x, y, width, height, 13);
+  context.fill();
+  context.textAlign = "center";
+  context.fillStyle = target === "browser-open" ? "#19221e" : "#f4f3f0";
+  context.font = "15px sans-serif";
+  context.fillText(label, x + width / 2, y + height / 2);
 }
 
 function drawHandUiButton(context, x, y, width, height, icon, title, detail, target) {
