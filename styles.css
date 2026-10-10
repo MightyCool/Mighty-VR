@@ -169,6 +169,51 @@ input:focus-visible {
   transition: transform 160ms ease, background 160ms ease;
 }
 
+.stream-pc-button {
+  min-height: 46px;
+  margin: 15px 0 0 10px;
+  padding: 12px 15px;
+  border: 1px solid #454956;
+  background: #1b1f29;
+  color: #f4f3f0;
+  font-size: 13px;
+}
+
+.pc-stream-status {
+  display: grid;
+  gap: 8px;
+  max-width: 380px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #363b46;
+  border-radius: 9px;
+  background: #181b23;
+  color: #b4b5bd;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pc-stream-status strong {
+  color: var(--mint);
+}
+
+.pc-stream-status output {
+  color: #f4f3f0;
+  font: 700 34px/1.2 "Space Grotesk", sans-serif;
+  letter-spacing: 9px;
+}
+
+.pc-stream-status video {
+  width: 100%;
+  max-height: 180px;
+  border-radius: 6px;
+  background: #090a0e;
+}
+
+.pc-stream-status .text-button {
+  justify-self: start;
+}
+
 .primary-button:hover,
 .secondary-button:hover {
   transform: translateY(-1px);
@@ -516,6 +561,14 @@ input:focus-visible {
   border: 0;
   background: #fff;
   touch-action: auto;
+}
+
+.stream-source-video {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .scene-stage canvas {

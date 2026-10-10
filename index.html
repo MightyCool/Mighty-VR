@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#101319" />
     <meta
       name="description"
-      content="A simple stereoscopic VR room and motion-tracking demo for your iPhone."
+      content="Vr thing ya ya he he."
     />
     <title>DIY VR — Your own little world</title>
     <link rel="stylesheet" href="./styles.css" />
@@ -31,6 +31,16 @@
             <button class="primary-button" id="launch-button" type="button">
               <span>Enter the demo</span><span aria-hidden="true">↗</span>
             </button>
+            <button class="secondary-button stream-pc-button" id="start-pc-stream-button" type="button">
+              Start a Stream PC
+            </button>
+            <div class="pc-stream-status" id="pc-stream-status" role="status" aria-live="polite" hidden>
+              <strong id="pc-stream-status-title"></strong>
+              <span id="pc-stream-status-detail"></span>
+              <output id="pc-stream-code" hidden></output>
+              <video id="pc-stream-preview" autoplay muted playsinline hidden></video>
+              <button class="text-button" id="stop-pc-stream-button" type="button" hidden>Stop sharing</button>
+            </div>
             <p class="hero-footnote">Made for your screen. No headset required to try it.</p>
           </div>
 

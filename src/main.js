@@ -1,9 +1,17 @@
 import * as THREE from "../node_modules/three/build/three.module.js";
 import { CSS3DObject, CSS3DRenderer } from "../node_modules/three/examples/jsm/renderers/CSS3DRenderer.js";
+import { createPcStreamPeer, createPcStreamSession, joinPcStreamSession } from "./pc-stream.js";
 
 const homeScreen = document.querySelector("#home-screen");
 const demoScreen = document.querySelector("#demo-screen");
 const launchButton = document.querySelector("#launch-button");
+const startPcStreamButton = document.querySelector("#start-pc-stream-button");
+const stopPcStreamButton = document.querySelector("#stop-pc-stream-button");
+const pcStreamStatus = document.querySelector("#pc-stream-status");
+const pcStreamStatusTitle = document.querySelector("#pc-stream-status-title");
+const pcStreamStatusDetail = document.querySelector("#pc-stream-status-detail");
+const pcStreamCode = document.querySelector("#pc-stream-code");
+const pcStreamPreview = document.querySelector("#pc-stream-preview");
 const homeButton = document.querySelector("#home-button");
 const fullscreenButton = document.querySelector("#fullscreen-button");
 const fullscreenStatus = document.querySelector("#fullscreen-status");
@@ -58,6 +66,16 @@ let handDockTexture;
 let browserViewport;
 let browserFrame;
 let browserObject;
+let streamVideo;
+let streamScreen;
+let streamTexture;
+let streamConnected = false;
+let streamStatus = "Enter the four-digit code shown on the PC.";
+let pcDisplayStream;
+let pcStreamPeer;
+let pcStreamStopping = false;
+let vrStreamPeer;
+let streamCode = "";
 let handUiDrag;
 let handUiCanvas;
 let handUiContext;
@@ -170,12 +188,123 @@ launchButton.addEventListener("click", () => {
   startScene();
 });
 
+startPcStreamButton.addEventListener("click", startPcScreenShare);
+stopPcStreamButton.addEventListener("click", () => stopPcScreenShare("Screen sharing stopped."));
+
 homeButton.addEventListener("click", () => {
+  stopVrScreenStream();
   stopHandTracking();
   stopScene();
   demoScreen.hidden = true;
   homeScreen.hidden = false;
 });
+
+async function startPcScreenShare() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    setPcStreamStatus(
+      "Screen sharing is unavailable",
+      "Open this page in a current desktop browser over HTTPS or localhost.",
+    );
+    return;
+  }
+
+  startPcStreamButton.disabled = true;
+  setPcStreamStatus("Choose a screen to share", "In the browser prompt, choose Entire Screen, then confirm Share.");
+  let captureRequest;
+  try {
+    captureRequest = navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: "monitor" },
+      audio: false,
+    });
+  } catch (error) {
+    startPcStreamButton.disabled = false;
+    setPcStreamStatus("Could not start screen sharing", error instanceof Error ? error.message : String(error));
+    return;
+  }
+
+  try {
+    pcDisplayStream = await captureRequest;
+    pcStreamStopping = false;
+    pcStreamPreview.srcObject = pcDisplayStream;
+    pcStreamPreview.hidden = false;
+    await pcStreamPreview.play();
+    const session = await createPcStreamSession();
+    pcStreamPeer = createPcStreamPeer({
+      code: session.code,
+      role: "host",
+      token: session.token,
+      onTrack: () => {},
+      onState: (state, message) => {
+        if (state === "connected") {
+          setPcStreamStatus("Connected to VR", "Your PC screen is now streaming directly to the paired VR device.");
+        } else if (state === "error") setPcStreamStatus("Stream connection problem", message);
+        else if (state === "ended") void stopPcScreenShare("The VR viewer disconnected.");
+      },
+    });
+    for (const track of pcDisplayStream.getTracks()) {
+      pcStreamPeer.addTrack(track, pcDisplayStream);
+      track.addEventListener("ended", () => stopPcScreenShare("Screen sharing ended."));
+    }
+    pcStreamPeer.startPolling();
+    await pcStreamPeer.createOffer();
+    pcStreamCode.textContent = session.code;
+    pcStreamCode.hidden = false;
+    stopPcStreamButton.hidden = false;
+    setPcStreamStatus("Ready to connect", "Open the VR app dock, choose Stream, and enter this four-digit code. Keep this page open.");
+  } catch (error) {
+    await stopPcScreenShare(
+      error instanceof Error ? error.message : String(error),
+      "Could not start your stream",
+    );
+  }
+}
+
+async function stopPcScreenShare(detail, title = "PC screen sharing") {
+  if (pcStreamStopping) return;
+  pcStreamStopping = true;
+  if (pcStreamPeer) {
+    try {
+      await pcStreamPeer.sendSignal({ type: "ended" });
+    } catch (error) {
+      console.warn("Unable to notify the VR viewer that screen sharing ended:", error);
+    }
+    pcStreamPeer.close();
+    pcStreamPeer = undefined;
+  }
+  for (const track of pcDisplayStream?.getTracks() || []) track.stop();
+  pcDisplayStream = undefined;
+  pcStreamPreview.srcObject = null;
+  pcStreamPreview.hidden = true;
+  pcStreamCode.hidden = true;
+  stopPcStreamButton.hidden = true;
+  startPcStreamButton.disabled = false;
+  setPcStreamStatus(title, detail);
+  pcStreamStopping = false;
+}
+
+function setPcStreamStatus(title, detail) {
+  pcStreamStatus.hidden = false;
+  pcStreamStatusTitle.textContent = title;
+  pcStreamStatusDetail.textContent = detail;
+}
+
+function stopVrScreenStream() {
+  if (vrStreamPeer) {
+    vrStreamPeer.sendSignal({ type: "ended" }).catch((error) => {
+      console.warn("Unable to notify the PC that the VR viewer disconnected:", error);
+    });
+  }
+  vrStreamPeer?.close();
+  vrStreamPeer = undefined;
+  streamConnected = false;
+  if (streamVideo) {
+    streamVideo.pause();
+    streamVideo.srcObject = null;
+  }
+  updateBrowserViewportLayout();
+  if (streamScreen) streamScreen.visible = false;
+  drawHandUi();
+}
 
 document.querySelector("#recenter-button").addEventListener("click", recenterView);
 document.querySelector("#recenter-top").addEventListener("click", recenterView);
@@ -525,6 +654,28 @@ function buildHandOverlay() {
   browserObject.scale.set(1.2 / 800, 0.96 / 640, 1);
   browserObject.visible = false;
   handUiPanel.add(browserObject);
+
+  streamVideo = document.createElement("video");
+  streamVideo.className = "stream-source-video";
+  streamVideo.autoplay = true;
+  streamVideo.playsInline = true;
+  streamVideo.muted = true;
+  streamVideo.addEventListener("loadedmetadata", updateStreamScreenGeometry);
+  stage.append(streamVideo);
+  streamTexture = new THREE.VideoTexture(streamVideo);
+  streamTexture.colorSpace = THREE.SRGBColorSpace;
+  streamTexture.generateMipmaps = false;
+  streamTexture.minFilter = THREE.LinearFilter;
+  streamTexture.magFilter = THREE.LinearFilter;
+  streamScreen = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.098, 0.6176),
+    new THREE.MeshBasicMaterial({ map: streamTexture, toneMapped: false }),
+  );
+  streamScreen.position.set(0, (0.5 - 392.5 / 640) * 0.96, 0.014);
+  streamScreen.visible = false;
+  streamScreen.renderOrder = 13;
+  streamScreen.userData.keepVisibleInPassthrough = true;
+  handUiPanel.add(streamScreen);
 
   handDockCanvas = document.createElement("canvas");
   handDockCanvas.width = 800;
@@ -1249,10 +1400,11 @@ function getHandTouchTarget(state, fingertip) {
       const dockY = (0.5 - handPanelPoint.y / 0.24) * handDockCanvas.height;
       if (dockY >= 112 && dockX >= 350 && dockX <= 450) return "window-drag";
       if (dockY >= 35 && dockY <= 120) {
-        if (dockX >= 210 && dockX <= 320) return "app-settings";
-        if (dockX >= 330 && dockX <= 440) return "dock-passthrough";
-        if (dockX >= 450 && dockX <= 560) return "app-browser";
-        if (dockX >= 570 && dockX <= 680) return "app-close-menu";
+        if (dockX >= 182 && dockX <= 268) return "app-settings";
+        if (dockX >= 277 && dockX <= 363) return "dock-passthrough";
+        if (dockX >= 372 && dockX <= 458) return "app-browser";
+        if (dockX >= 467 && dockX <= 553) return "app-stream";
+        if (dockX >= 562 && dockX <= 648) return "app-close-menu";
       }
       if (dockY >= 122 && dockY <= 152 && dockX >= 350 && dockX <= 450) {
         return "window-drag";
@@ -1273,10 +1425,11 @@ function getHandTouchTarget(state, fingertip) {
   const y = (0.5 - handPanelPoint.y / 0.96) * handUiCanvas.height;
   if (handUiMode === "dock") {
     if (y < 245 || y > 410) return null;
-    if (x >= 265 && x <= 375) return "app-settings";
-    if (x >= 385 && x <= 495) return "dock-passthrough";
-    if (x >= 505 && x <= 615) return "app-browser";
-    if (x >= 625 && x <= 735) return "app-close-menu";
+    if (x >= 202 && x <= 300) return "app-settings";
+    if (x >= 314 && x <= 412) return "dock-passthrough";
+    if (x >= 426 && x <= 524) return "app-browser";
+    if (x >= 538 && x <= 636) return "app-stream";
+    if (x >= 648 && x <= 746) return "app-close-menu";
     return null;
   }
   if (x >= 650 && x <= 720 && y <= 95) return "app-resize";
@@ -1303,6 +1456,22 @@ function getHandTouchTarget(state, fingertip) {
       if (x >= 160 && x < 265) return "browser-clear";
       if (x >= 275 && x < 545) return "browser-space";
       if (x >= 555 && x < 766) return "browser-open";
+    }
+    return null;
+  }
+  if (handUiMode === "stream") {
+    if (!streamConnected) {
+      const digitRows = [[270, 326], [342, 398], [414, 470]];
+      const row = digitRows.findIndex(([top, bottom]) => y >= top && y <= bottom);
+      const col = [255, 355, 455].findIndex((left) => x >= left && x <= left + 82);
+      if (row !== -1 && col !== -1) return `stream-digit-${row * 3 + col + 1}`;
+      if (y >= 486 && y <= 542 && x >= 355 && x <= 437) return "stream-digit-0";
+      if (y >= 590 && y <= 630) {
+        if (x >= 160 && x < 330) return "stream-clear";
+        if (x >= 470 && x <= 640) return "stream-join";
+      }
+    } else if (y >= 108 && y <= 160 && x >= 680 && x <= 766) {
+      return "stream-stop";
     }
     return null;
   }
@@ -1346,6 +1515,7 @@ function activateHandTarget(target, now = performance.now(), state = null) {
   if (target === "toggle-dock") {
     if (handUiMode === "closed") setHandUiMode("dock", state);
   } else if (target === "app-close-menu") {
+    stopVrScreenStream();
     setHandUiMode("closed");
   } else if (target === "settings-close") {
     setHandUiMode("dock");
@@ -1359,6 +1529,20 @@ function activateHandTarget(target, now = performance.now(), state = null) {
   } else if (target === "app-browser") {
     setHandUiMode("browser");
     if (!handBrowserUrl) openHandBrowserUrl("https://www.google.com/webhp?igu=1");
+  } else if (target === "app-stream") {
+    setHandUiMode("stream");
+  } else if (target === "stream-join") {
+    connectVrScreenStream();
+  } else if (target === "stream-stop") {
+    stopVrScreenStream();
+    streamStatus = "Disconnected. Enter another four-digit code to reconnect.";
+    drawHandUi();
+  } else if (target === "stream-clear") {
+    streamCode = "";
+    drawHandUi();
+  } else if (target.startsWith("stream-digit-")) {
+    if (streamCode.length < 4) streamCode += target.slice("stream-digit-".length);
+    drawHandUi();
   } else if (target === "browser-open") {
     openBrowserQuery();
   } else if (target === "browser-search") {
@@ -1423,8 +1607,10 @@ function activateHandTarget(target, now = performance.now(), state = null) {
     for (const state of handStates) state.requiresRelease = true;
   }
   handUiPanel.visible = handUiMode !== "closed";
-  handDockPanel.visible = handUiMode === "settings" || handUiMode === "browser";
+  handDockPanel.visible =
+    handUiMode === "settings" || handUiMode === "browser" || handUiMode === "stream";
   if (browserObject) browserObject.visible = handUiMode === "browser" && handBrowserPageOpen;
+  if (streamScreen) streamScreen.visible = handUiMode === "stream" && streamConnected;
   syncHandDockPosition();
   drawHandUi();
   drawHandDockBar();
@@ -1462,6 +1648,59 @@ function navigateHandBrowserHistory(direction) {
   drawHandUi();
 }
 
+async function connectVrScreenStream() {
+  if (streamCode.length !== 4) {
+    streamStatus = "Enter all four digits from the PC.";
+    drawHandUi();
+    return;
+  }
+
+  try {
+    stopVrScreenStream();
+    streamStatus = "Connecting to the PC…";
+    drawHandUi();
+    await joinPcStreamSession(streamCode);
+    vrStreamPeer = createPcStreamPeer({
+      code: streamCode,
+      role: "viewer",
+      onTrack: (mediaStream) => {
+        streamVideo.srcObject = mediaStream;
+        streamVideo.play().catch((error) => {
+          console.error("Unable to play the incoming PC screen:", error);
+          streamStatus = "Tap the screen area to start video playback.";
+          drawHandUi();
+        });
+      },
+      onState: (state, message) => {
+        if (state === "connected") {
+          streamConnected = true;
+          streamStatus = "Connected to your PC. Pinch Stop to disconnect.";
+          updateStreamScreenGeometry();
+          updateBrowserViewportLayout();
+        } else if (state === "ended") {
+          streamConnected = false;
+          streamStatus = "The PC stopped sharing its screen.";
+          streamVideo.pause();
+          streamVideo.srcObject = null;
+          updateBrowserViewportLayout();
+        } else if (state === "error") {
+          streamConnected = false;
+          streamStatus = message;
+          streamVideo.pause();
+          streamVideo.srcObject = null;
+          updateBrowserViewportLayout();
+        }
+        if (streamScreen) streamScreen.visible = handUiMode === "stream" && streamConnected;
+        drawHandUi();
+      },
+    });
+    vrStreamPeer.startPolling();
+  } catch (error) {
+    streamStatus = error instanceof Error ? error.message : String(error);
+    drawHandUi();
+  }
+}
+
 function updateBrowserViewportLayout() {
   if (!browserViewport || !browserObject) return;
   const top = 165;
@@ -1472,6 +1711,18 @@ function updateBrowserViewportLayout() {
     (0.5 - (top + height / 2) / handUiCanvas.height) * 0.96,
     0.012,
   );
+}
+
+function updateStreamScreenGeometry() {
+  if (!streamScreen || !streamVideo?.videoWidth || !streamVideo.videoHeight) return;
+  const maxWidth = 1.098;
+  const maxHeight = 0.6825;
+  const aspect = streamVideo.videoWidth / streamVideo.videoHeight;
+  const width = Math.min(maxWidth, maxHeight * aspect);
+  const height = width / aspect;
+  streamScreen.geometry.dispose();
+  streamScreen.geometry = new THREE.PlaneGeometry(width, height);
+  streamScreen.position.y = (0.5 - 392.5 / 640) * 0.96;
 }
 
 function openBrowserQuery() {
@@ -1506,6 +1757,7 @@ function updateHandUiDrag(state, isPinching) {
   }
   handPanelPoint.copy(state.points[8]).sub(handUiDrag.startPoint);
   handUiPanel.position.copy(handUiDrag.startPosition).add(handPanelPoint);
+  handUiPanel.quaternion.copy(camera.quaternion);
   handUiPanel.updateMatrixWorld(true);
   syncHandDockPosition();
 }
@@ -1525,10 +1777,13 @@ function syncHandDockPosition() {
 function setHandUiMode(mode, anchorState = null) {
   const openingDock = mode === "dock" && handUiMode === "closed";
   handUiMode = mode;
-  stage.classList.toggle("is-browser-active", mode === "browser");
+  stage.classList.toggle("is-browser-active", mode === "browser" || mode === "stream");
   handUiDrag = undefined;
   updateHandUiPanelSize();
   handUiPanel.visible = mode !== "closed";
+  handDockPanel.visible = mode === "settings" || mode === "browser" || mode === "stream";
+  if (browserObject) browserObject.visible = mode === "browser" && handBrowserPageOpen;
+  if (streamScreen) streamScreen.visible = mode === "stream" && streamConnected;
   handUiPanel.updateMatrixWorld(true);
   if (openingDock) {
     handCameraRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
@@ -1653,19 +1908,21 @@ function drawHandUi() {
     context.fillStyle = "#87909e";
     context.font = "12px sans-serif";
     context.fillText("PINCH OR TOUCH", 50, 365);
-    drawHandDockApp(context, 260, 247, "⚙", "Settings", false, "app-settings", "Room controls");
+    drawHandDockApp(context, 202, 247, "⚙", "Settings", false, "app-settings", "Room controls", 98);
     drawHandDockApp(
       context,
-      380,
+      314,
       247,
       "◉",
       "Passthrough",
       passthroughEnabled,
       "dock-passthrough",
       passthroughEnabled ? "Camera on" : "See your space",
+      98,
     );
-    drawHandDockApp(context, 500, 247, "⌕", "Browser", false, "app-browser", "Google · YouTube");
-    drawHandDockApp(context, 620, 247, "×", "Close Menu", false, "app-close-menu", "Close the dock");
+    drawHandDockApp(context, 426, 247, "⌕", "Browser", false, "app-browser", "Web pages", 98);
+    drawHandDockApp(context, 538, 247, "▣", "Stream", false, "app-stream", "PC screen", 98);
+    drawHandDockApp(context, 650, 247, "×", "Close Menu", false, "app-close-menu", "Close the dock", 98);
   } else {
     context.fillStyle = "#10141ef2";
     roundedRectPath(context, 8, 8, 784, 624, 34);
@@ -1676,7 +1933,11 @@ function drawHandUi() {
     context.font = "600 30px sans-serif";
     context.fillText("‹", 42, 56);
     context.font = "600 29px sans-serif";
-    context.fillText(handUiMode === "browser" ? "Browser" : "Settings", 92, 56);
+    context.fillText(
+      handUiMode === "browser" ? "Browser" : handUiMode === "stream" ? "Stream" : "Settings",
+      92,
+      56,
+    );
     context.fillStyle = "#ffffff14";
     roundedRectPath(context, 650, 25, 72, 62, 16);
     context.fill();
@@ -1690,6 +1951,11 @@ function drawHandUi() {
     context.fillText("×", 750, 56);
     if (handUiMode === "browser") {
       drawBrowserApp(context);
+      handUiTexture.needsUpdate = true;
+      return;
+    }
+    if (handUiMode === "stream") {
+      drawStreamApp(context);
       handUiTexture.needsUpdate = true;
       return;
     }
@@ -1721,7 +1987,7 @@ function drawHandDockBar() {
   if (!handDockContext || !handDockTexture) return;
   const context = handDockContext;
   context.clearRect(0, 0, handDockCanvas.width, handDockCanvas.height);
-  if (handUiMode !== "settings" && handUiMode !== "browser") {
+  if (handUiMode !== "settings" && handUiMode !== "browser" && handUiMode !== "stream") {
     handDockTexture.needsUpdate = true;
     return;
   }
@@ -1737,17 +2003,11 @@ function drawHandDockBar() {
   context.fillStyle = "#b9f3d4";
   context.font = "600 19px sans-serif";
   context.fillText("MVR", 84, 78);
-  drawDockBarButton(context, 265, "⚙", "Settings", handUiMode === "settings", "app-settings");
-  drawDockBarButton(
-    context,
-    385,
-    "◉",
-    "Passthrough",
-    passthroughEnabled,
-    "dock-passthrough",
-  );
-  drawDockBarButton(context, 505, "⌕", "Browser", handUiMode === "browser", "app-browser");
-  drawDockBarButton(context, 625, "×", "Close Menu", false, "app-close-menu");
+  drawDockBarButton(context, 225, "⚙", "Settings", handUiMode === "settings", "app-settings");
+  drawDockBarButton(context, 320, "◉", "Pass", passthroughEnabled, "dock-passthrough");
+  drawDockBarButton(context, 415, "⌕", "Browser", handUiMode === "browser", "app-browser");
+  drawDockBarButton(context, 510, "▣", "Stream", handUiMode === "stream", "app-stream");
+  drawDockBarButton(context, 605, "×", "Close Menu", false, "app-close-menu");
   const dragging = handStates.some((state) => state.touchTarget === "window-drag");
   context.fillStyle = dragging ? "#b9f3d4" : "#ffffff50";
   roundedRectPath(context, 352, 121, 96, 28, 12);
@@ -1761,7 +2021,7 @@ function drawHandDockBar() {
 function drawDockBarButton(context, centerX, icon, label, selected, target) {
   const hovered = handStates.some((state) => state.touchTarget === target);
   context.fillStyle = selected ? "#b9f3d4" : hovered ? "#ffffff35" : "#ffffff12";
-  roundedRectPath(context, centerX - 50, 27, 100, 74, 18);
+  roundedRectPath(context, centerX - 43, 27, 86, 74, 18);
   context.fill();
   context.textAlign = "center";
   context.textBaseline = "middle";
@@ -1772,10 +2032,10 @@ function drawDockBarButton(context, centerX, icon, label, selected, target) {
   context.fillText(label, centerX, 82);
 }
 
-function drawHandDockApp(context, x, y, icon, label, selected, target, detail) {
+function drawHandDockApp(context, x, y, icon, label, selected, target, detail, width = 108) {
   const hovered = handStates.some((state) => state.touchTarget === target);
   context.fillStyle = selected ? "#b9f3d4" : hovered ? "#e6ebf2" : "#ffffff14";
-  roundedRectPath(context, x, y, 108, 142, 28);
+  roundedRectPath(context, x, y, width, 142, 22);
   context.fill();
   context.strokeStyle = selected || hovered ? "#ffffffb0" : "#ffffff30";
   context.lineWidth = 2;
@@ -1784,12 +2044,12 @@ function drawHandDockApp(context, x, y, icon, label, selected, target, detail) {
   context.textBaseline = "middle";
   context.fillStyle = selected ? "#19221e" : "#edf0f4";
   context.font = "42px sans-serif";
-  context.fillText(icon, x + 54, y + 48);
+  context.fillText(icon, x + width / 2, y + 48);
   context.font = label.length > 9 ? "12px sans-serif" : "14px sans-serif";
-  context.fillText(label, x + 54, y + 93);
+  context.fillText(label, x + width / 2, y + 93);
   context.fillStyle = selected ? "#344840" : "#abb2be";
   context.font = "11px sans-serif";
-  context.fillText(detail, x + 54, y + 123);
+  context.fillText(detail, x + width / 2, y + 123);
 }
 
 function drawBrowserApp(context) {
@@ -1857,6 +2117,75 @@ function drawBrowserApp(context) {
     context.font = "11px sans-serif";
     context.fillText("Websites that block embedded browsing may not display here.", 400, 408);
   }
+}
+
+function drawStreamApp(context) {
+  context.textAlign = "left";
+  context.fillStyle = "#aeb4c2";
+  context.font = "15px sans-serif";
+  context.fillText("STREAM YOUR PC SCREEN", 42, 98);
+  context.fillStyle = "#222733";
+  roundedRectPath(context, 34, 108, 732, 52, 15);
+  context.fill();
+  context.fillStyle = streamConnected ? "#b9f3d4" : "#f4f3f0";
+  context.font = "15px sans-serif";
+  context.fillText(
+    streamConnected ? "PC screen connected" : `Code: ${streamCode.padEnd(4, "·")}`,
+    54,
+    134,
+  );
+  context.fillStyle = streamConnected ? "#e7b2a8" : "#b9f3d4";
+  roundedRectPath(context, 680, 114, 78, 40, 11);
+  context.fill();
+  context.textAlign = "center";
+  context.fillStyle = "#19221e";
+  context.font = "600 13px sans-serif";
+  context.fillText(streamConnected ? "Stop" : "Join", 719, 134);
+
+  context.fillStyle = "#242936";
+  roundedRectPath(context, 34, 165, 732, streamConnected ? 455 : 190, 12);
+  context.fill();
+  context.strokeStyle = "#ffffff55";
+  context.lineWidth = 1;
+  context.stroke();
+  context.textAlign = "center";
+  context.fillStyle = "#f4f3f0";
+  context.font = "15px sans-serif";
+  context.fillText(streamStatus, 400, streamConnected ? 600 : 260);
+
+  if (!streamConnected) {
+    for (let digit = 1; digit <= 9; digit += 1) {
+      const index = digit - 1;
+      const col = index % 3;
+      const row = Math.floor(index / 3);
+      const x = 255 + col * 100;
+      const y = 270 + row * 72;
+      drawStreamKey(context, x, y, String(digit));
+    }
+    drawStreamKey(context, 355, 486, "0");
+    drawBrowserSpecialKey(context, 160, 581, 170, 42, "Clear", "stream-clear");
+    drawBrowserSpecialKey(context, 470, 581, 170, 42, "Join stream", "stream-join");
+    context.fillStyle = "#87909e";
+    context.font = "12px sans-serif";
+    context.fillText("Start a Stream PC on your computer, then enter its code.", 400, 555);
+  } else {
+    context.fillStyle = "#87909e";
+    context.font = "12px sans-serif";
+    context.fillText("Your PC screen appears above in this window.", 400, 580);
+  }
+}
+
+function drawStreamKey(context, x, y, digit) {
+  const target = `stream-digit-${digit}`;
+  const hovered = handStates.some((state) => state.touchTarget === target);
+  context.fillStyle = hovered ? "#35483f" : "#222733";
+  roundedRectPath(context, x, y, 82, 56, 12);
+  context.fill();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillStyle = "#f4f3f0";
+  context.font = "21px sans-serif";
+  context.fillText(digit, x + 41, y + 28);
 }
 
 function drawBrowserShortcut(context, x, title, detail, icon, target) {
@@ -2136,26 +2465,25 @@ function renderFrame() {
   if (browserObject) {
     browserObject.visible = handUiMode === "browser" && handBrowserPageOpen;
   }
-
   if (!stereoToggle.checked) {
-    const showBrowser = handUiMode === "browser" && Boolean(browserObject?.visible);
-    if (browserRenderer) browserRenderer.domElement.style.display = showBrowser ? "" : "none";
+    const showCssApp = handUiMode === "browser" && Boolean(browserObject?.visible);
+    if (browserRenderer) browserRenderer.domElement.style.display = showCssApp ? "" : "none";
     renderer.setScissorTest(false);
     renderer.setViewport(0, 0, stage.clientWidth, stage.clientHeight);
     renderer.render(scene, camera);
-    if (showBrowser) browserRenderer?.render(scene, camera);
+    if (showCssApp) browserRenderer?.render(scene, camera);
     return;
   }
 
-  const showBrowser = handUiMode === "browser" && Boolean(browserObject?.visible);
-  if (browserRenderer) browserRenderer.domElement.style.display = showBrowser ? "" : "none";
+  const showCssApp = handUiMode === "browser" && Boolean(browserObject?.visible);
+  if (browserRenderer) browserRenderer.domElement.style.display = showCssApp ? "" : "none";
   const halfWidth = Math.floor(stage.clientWidth / 2);
   const fullHeight = stage.clientHeight;
   renderer.setScissorTest(true);
   renderEye(leftCamera, -0.032, 0, halfWidth, fullHeight);
   renderEye(rightCamera, 0.032, halfWidth, stage.clientWidth - halfWidth, fullHeight);
   renderer.setScissorTest(false);
-  if (showBrowser) browserRenderer?.render(scene, camera);
+  if (showCssApp) browserRenderer?.render(scene, camera);
 }
 
 function renderEye(eyeCamera, eyeOffsetX, viewportX, viewportWidth, viewportHeight) {
