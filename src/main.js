@@ -34,9 +34,10 @@ let handVideo;
 let handTrackingActive = false;
 let handVideoPlaybackPending = false;
 let lastHandFrameTime = 0;
+let lastHandVideoTime = -1;
 let handWasPinching = false;
 let handRig;
-let handJoints = [];
+let handJoints;
 let handCursor;
 let handLauncher;
 let handMenu;
@@ -49,9 +50,7 @@ let handTouchTarget = null;
 let handTouchStartedAt = 0;
 let handTouchActivated = false;
 let handHoveredTarget = null;
-let handPalm;
-let handSegments = [];
-let handNails = [];
+let handSegments;
 let orientationAvailable = typeof window.DeviceOrientationEvent === "function";
 let orientationState = "off";
 let currentOrientation = null;
@@ -71,6 +70,12 @@ const cameraEuler = new THREE.Euler(0, 0, 0, "YXZ");
 const screenOrientationQuaternion = new THREE.Quaternion();
 const eyeOffset = new THREE.Vector3();
 const handWorldPoint = new THREE.Vector3();
+const handPoints = Array.from({ length: 21 }, () => new THREE.Vector3());
+const handSegmentDirection = new THREE.Vector3();
+const handInstanceScale = new THREE.Vector3();
+const handInstanceMatrix = new THREE.Matrix4();
+const handSegmentQuaternion = new THREE.Quaternion();
+const handIdentityQuaternion = new THREE.Quaternion();
 const handConnections = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -350,8 +355,13 @@ function createScene() {
   leftCamera = new THREE.PerspectiveCamera();
   rightCamera = new THREE.PerspectiveCamera();
 
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "low-power" });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
+  renderer = new THREE.WebGLRenderer({
+    antialias: !isTouchDevice,
+    alpha: false,
+    powerPreference: "low-power",
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isTouchDevice ? 1 : 1.5));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.15;
@@ -370,32 +380,18 @@ function buildHandOverlay() {
     roughness: 0.58,
     depthTest: false,
   });
-  const segmentGeometry = new THREE.CylinderGeometry(1, 1, 1, 10);
-  handSegments = handConnections.map(([start, end]) => {
-    const segment = new THREE.Mesh(segmentGeometry, handMaterial);
-    segment.userData.landmarkPair = [start, end];
-    handRig.add(segment);
-    return segment;
-  });
+  const segmentGeometry = new THREE.CylinderGeometry(1, 1, 1, 6);
+  handSegments = new THREE.InstancedMesh(segmentGeometry, handMaterial, handConnections.length);
+  handSegments.renderOrder = 15;
+  handSegments.frustumCulled = false;
+  handRig.add(handSegments);
 
-  handPalm = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), handMaterial);
-  handRig.add(handPalm);
-
-  const jointGeometry = new THREE.SphereGeometry(1, 10, 8);
+  const jointGeometry = new THREE.SphereGeometry(1, 6, 5);
   const jointMaterial = new THREE.MeshStandardMaterial({ color: 0xe2b99a, roughness: 0.55, depthTest: false });
-  handJoints = Array.from({ length: 21 }, () => {
-    const joint = new THREE.Mesh(jointGeometry, jointMaterial);
-    handRig.add(joint);
-    return joint;
-  });
-  const nailGeometry = new THREE.SphereGeometry(1, 8, 6);
-  const nailMaterial = new THREE.MeshStandardMaterial({ color: 0xf1d6c2, roughness: 0.48, depthTest: false });
-  handNails = [4, 8, 12, 16, 20].map((index) => {
-    const nail = new THREE.Mesh(nailGeometry, nailMaterial);
-    nail.userData.landmarkIndex = index;
-    handRig.add(nail);
-    return nail;
-  });
+  handJoints = new THREE.InstancedMesh(jointGeometry, jointMaterial, 21);
+  handJoints.renderOrder = 15;
+  handJoints.frustumCulled = false;
+  handRig.add(handJoints);
   handRig.visible = false;
   handRig.renderOrder = 15;
   scene.add(handRig);
@@ -464,8 +460,8 @@ async function startHandTracking() {
       audio: false,
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 480 },
-        height: { ideal: 360 },
+        width: { ideal: 320 },
+        height: { ideal: 240 },
       },
     };
     handStream = await navigator.mediaDevices.getUserMedia(cameraConstraints);
@@ -486,8 +482,8 @@ async function startHandTracking() {
         audio: false,
         video: {
           facingMode: { exact: "environment" },
-          width: { ideal: 480 },
-          height: { ideal: 360 },
+          width: { ideal: 320 },
+          height: { ideal: 240 },
         },
       });
       videoTrack = handStream.getVideoTracks()[0];
@@ -513,6 +509,7 @@ async function startHandTracking() {
     handVideo.setAttribute("aria-hidden", "true");
     handVideo.className = "hand-camera-source";
     handVideo.srcObject = handStream;
+    lastHandVideoTime = -1;
     document.body.append(handVideo);
     await playHandVideo();
 
@@ -638,6 +635,7 @@ function getHandTrackingErrorMessage(error, startupStep) {
 function stopCameraStream() {
   for (const track of handStream?.getTracks() || []) track.stop();
   handStream = undefined;
+  lastHandVideoTime = -1;
   if (handVideo) {
     handVideo.srcObject = null;
     handVideo.remove();
@@ -676,8 +674,9 @@ function updateHandTracking() {
     return;
   }
   const now = performance.now();
-  if (now - lastHandFrameTime < 90) return;
+  if (now - lastHandFrameTime < 100 || handVideo.currentTime === lastHandVideoTime) return;
   lastHandFrameTime = now;
+  lastHandVideoTime = handVideo.currentTime;
 
   try {
     const result = handLandmarker.detectForVideo(handVideo, now);
@@ -687,13 +686,17 @@ function updateHandTracking() {
       handCursor.visible = false;
       handWasPinching = false;
       updateHandTouch(null, 0, now);
-      handTrackingStatus.textContent = "Looking for a hand. Move it into the rear camera view.";
+      if (handTrackingStatus.textContent !== "Looking for a hand. Move it into the rear camera view.") {
+        handTrackingStatus.textContent = "Looking for a hand. Move it into the rear camera view.";
+      }
       return;
     }
 
     handRig.visible = true;
     handCursor.visible = true;
-    handTrackingStatus.textContent = "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.";
+    if (handTrackingStatus.textContent !== "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.") {
+      handTrackingStatus.textContent = "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.";
+    }
     updateHandPose(landmarks);
 
     const palmSize = Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
@@ -726,36 +729,37 @@ function screenPointToWorld(x, y, depth, zOffset = 0) {
 }
 
 function updateHandPose(landmarks) {
-  const points = landmarks.map((landmark) =>
-    screenPointToWorld(landmark.x, landmark.y, 1.2, landmark.z * 0.35).clone(),
-  );
-  const handWidth = Math.max(points[5].distanceTo(points[17]), points[0].distanceTo(points[9]) * 0.55);
-  for (let i = 0; i < handJoints.length; i += 1) {
-    handJoints[i].position.copy(points[i]);
-    handJoints[i].scale.setScalar(handWidth * (i === 0 ? 0.105 : 0.09));
+  for (let i = 0; i < landmarks.length; i += 1) {
+    const landmark = landmarks[i];
+    handPoints[i].copy(screenPointToWorld(landmark.x, landmark.y, 1.2, landmark.z * 0.35));
   }
 
-  for (const segment of handSegments) {
-    const [start, end] = segment.userData.landmarkPair;
-    const direction = points[end].clone().sub(points[start]);
-    const length = direction.length();
-    segment.position.copy(points[start]).add(points[end]).multiplyScalar(0.5);
-    segment.quaternion.setFromUnitVectors(WORLD_UP, direction.normalize());
+  const handWidth = Math.max(handPoints[5].distanceTo(handPoints[17]), handPoints[0].distanceTo(handPoints[9]) * 0.55);
+  for (let i = 0; i < handConnections.length; i += 1) {
+    const [start, end] = handConnections[i];
+    handSegmentDirection.subVectors(handPoints[end], handPoints[start]);
+    const length = handSegmentDirection.length();
+    handSegmentDirection.normalize();
+    handSegmentQuaternion.setFromUnitVectors(WORLD_UP, handSegmentDirection);
     const radiusScale = start === 0 || end === 0 ? 0.075 : 0.055;
-    segment.scale.set(handWidth * radiusScale, length, handWidth * radiusScale);
+    handInstanceScale.set(handWidth * radiusScale, length, handWidth * radiusScale);
+    handSegmentDirection
+      .copy(handPoints[start])
+      .add(handPoints[end])
+      .multiplyScalar(0.5);
+    handInstanceMatrix.compose(handSegmentDirection, handSegmentQuaternion, handInstanceScale);
+    handSegments.setMatrixAt(i, handInstanceMatrix);
   }
+  handSegments.instanceMatrix.needsUpdate = true;
 
-  handPalm.position.copy(points[0]).add(points[5]).add(points[9]).add(points[13]).add(points[17]).multiplyScalar(0.2);
-  handPalm.scale.set(handWidth * 0.46, points[0].distanceTo(points[9]) * 0.58, handWidth * 0.16);
-  handPalm.quaternion.copy(camera.quaternion);
-
-  for (const nail of handNails) {
-    const index = nail.userData.landmarkIndex;
-    nail.position.copy(points[index]).add(points[index].clone().sub(points[index - 1]).normalize().multiplyScalar(handWidth * 0.035));
-    nail.scale.set(handWidth * 0.065, handWidth * 0.095, handWidth * 0.018);
+  for (let i = 0; i < handPoints.length; i += 1) {
+    handInstanceScale.setScalar(handWidth * (i === 0 ? 0.105 : 0.09));
+    handInstanceMatrix.compose(handPoints[i], handIdentityQuaternion, handInstanceScale);
+    handJoints.setMatrixAt(i, handInstanceMatrix);
   }
+  handJoints.instanceMatrix.needsUpdate = true;
 
-  handCursor.position.copy(points[8]);
+  handCursor.position.copy(handPoints[8]);
 
   if (handLauncherShown) {
     handLauncher.visible = !handMenuOpen;
