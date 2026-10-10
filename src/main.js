@@ -57,6 +57,10 @@ let handUiWidth = 1.2;
 let handUiHeight = 0.96;
 let lastHandUiActivation = "";
 let lastHandUiActivationAt = 0;
+let passthroughEnabled = false;
+let passthroughPlane;
+let passthroughMaterial;
+let passthroughTexture;
 let orientationAvailable = typeof window.DeviceOrientationEvent === "function";
 let orientationState = "off";
 let currentOrientation = null;
@@ -431,6 +435,7 @@ function buildHandOverlay() {
     rig.add(joints);
     rig.visible = false;
     rig.renderOrder = 15;
+    rig.userData.keepVisibleInPassthrough = true;
     scene.add(rig);
 
     const cursor = new THREE.Mesh(
@@ -439,6 +444,7 @@ function buildHandOverlay() {
     );
     cursor.visible = false;
     cursor.renderOrder = 16;
+    cursor.userData.keepVisibleInPassthrough = true;
     scene.add(cursor);
 
     return {
@@ -455,6 +461,8 @@ function buildHandOverlay() {
       poseInitialized: false,
       wasPinching: false,
       wasFist: false,
+      fistFrames: 0,
+      releaseFrames: 0,
       touchTarget: null,
       touchStartedAt: 0,
       touchActivated: false,
@@ -479,6 +487,7 @@ function buildHandOverlay() {
   );
   handUiPanel.visible = false;
   handUiPanel.renderOrder = 12;
+  handUiPanel.userData.keepVisibleInPassthrough = true;
   scene.add(handUiPanel);
   drawHandUi();
 }
@@ -802,6 +811,7 @@ function getHandTrackingErrorMessage(error, startupStep) {
 }
 
 function stopCameraStream() {
+  setPassthroughEnabled(false);
   for (const track of handStream?.getTracks() || []) track.stop();
   handStream = undefined;
   handWorker?.terminate();
@@ -844,6 +854,8 @@ function resetHandOverlays() {
     state.visible = false;
     state.wasPinching = false;
     state.wasFist = false;
+    state.fistFrames = 0;
+    state.releaseFrames = 0;
     state.touchTarget = null;
     state.touchStartedAt = 0;
     state.touchActivated = false;
@@ -966,6 +978,12 @@ function processHandLandmarks(hands, handedness, now) {
       updateHandPose(state, landmarks, palmSize);
     } else {
       state.wasPinching = false;
+      state.wasFist = false;
+      state.fistFrames = 0;
+      state.releaseFrames = 0;
+      state.touchTarget = null;
+      state.touchActivated = false;
+      state.requiresRelease = false;
       updateHandTouch(state, null, now);
     }
   }
@@ -988,8 +1006,18 @@ function processHandLandmarks(hands, handedness, now) {
     );
     const isPinching = palmSize > 0 && pinchDistance / palmSize < 0.34;
     const isFist = isHandFist(landmarks, palmSize);
-    if (isFist && !state.wasFist) activateHandTarget("toggle-dock", now, state);
-    state.wasFist = isFist;
+    if (isFist) {
+      state.fistFrames += 1;
+      state.releaseFrames = 0;
+      if (state.fistFrames >= 2 && !state.wasFist) {
+        state.wasFist = true;
+        activateHandTarget("toggle-dock", now, state);
+      }
+    } else {
+      state.fistFrames = 0;
+      state.releaseFrames += 1;
+      if (state.releaseFrames >= 2) state.wasFist = false;
+    }
 
     const touchTarget = getHandTouchTarget(state, state.points[8]);
     updateHandTouch(state, touchTarget, now);
@@ -1039,12 +1067,25 @@ function isHandFist(landmarks, palmSize) {
   if (palmSize < 0.001) return false;
   const wrist = landmarks[0];
   let curledFingers = 0;
-  for (const [pipIndex, tipIndex] of [[6, 8], [10, 12], [14, 16], [18, 20]]) {
+  for (const [mcpIndex, pipIndex, tipIndex] of [
+    [5, 6, 8],
+    [9, 10, 12],
+    [13, 14, 16],
+    [17, 18, 20],
+  ]) {
+    const mcp = landmarks[mcpIndex];
     const pip = landmarks[pipIndex];
     const tip = landmarks[tipIndex];
+    const tipToMcp = Math.hypot(tip.x - mcp.x, tip.y - mcp.y);
+    const pipToMcp = Math.hypot(pip.x - mcp.x, pip.y - mcp.y);
     const pipDistance = Math.hypot(pip.x - wrist.x, pip.y - wrist.y);
     const tipDistance = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
-    if (tipDistance < pipDistance + palmSize * 0.18) curledFingers += 1;
+    if (
+      tipDistance < pipDistance + palmSize * 0.18 ||
+      tipToMcp < pipToMcp * 1.7
+    ) {
+      curledFingers += 1;
+    }
   }
   return curledFingers === 4;
 }
@@ -1130,7 +1171,7 @@ function getHandTouchTarget(state, fingertip) {
   handPanelPoint.copy(fingertip);
   handUiPanel.worldToLocal(handPanelPoint);
   if (
-    Math.abs(handPanelPoint.z) > 0.07 ||
+    Math.abs(handPanelPoint.z) > 0.15 ||
     Math.abs(handPanelPoint.x) > handUiWidth / 2 ||
     Math.abs(handPanelPoint.y) > handUiHeight / 2
   ) {
@@ -1139,9 +1180,9 @@ function getHandTouchTarget(state, fingertip) {
   const x = (handPanelPoint.x / handUiWidth + 0.5) * handUiCanvas.width;
   const y = (0.5 - handPanelPoint.y / handUiHeight) * handUiCanvas.height;
   if (handUiMode === "dock") {
-    if (x >= 715 && y >= 250 && y <= 390) return "dock-close";
-    if (x >= 425 && x <= 585 && y >= 250 && y <= 390) return "app-settings";
-    if (x >= 590 && x <= 705 && y >= 250 && y <= 390) return "dock-recenter";
+    if (x >= 700 && y >= 250 && y <= 390) return "dock-close";
+    if (x >= 305 && x <= 470 && y >= 240 && y <= 400) return "app-settings";
+    if (x >= 480 && x <= 650 && y >= 240 && y <= 400) return "dock-passthrough";
     return null;
   }
   if (x >= 715 && y <= 95) return "settings-close";
@@ -1188,10 +1229,9 @@ function activateHandTarget(target, now = performance.now(), state = null) {
     setHandUiMode("closed");
   } else if (target === "app-settings") {
     setHandUiMode("settings");
-  } else if (target === "dock-recenter") {
-    recenterView();
-  } else if (target === "dock-room") {
-    setHandUiMode("closed");
+  } else if (target === "dock-passthrough") {
+    setPassthroughEnabled(!passthroughEnabled);
+    drawHandUi();
   } else if (target === "settings-back") {
     setHandUiMode("dock");
   } else if (target === "setting-motion") {
@@ -1233,9 +1273,9 @@ function activateHandTarget(target, now = performance.now(), state = null) {
 function setHandUiMode(mode, anchorState = null) {
   const openingDock = mode === "dock" && handUiMode === "closed";
   handUiMode = mode;
-  handUiWidth = 1.2;
-  handUiHeight = mode === "dock" ? 0.34 : 0.96;
-  handUiPanel.scale.set(1, handUiHeight / 0.96, 1);
+  handUiWidth = mode === "dock" ? 0.9 : 1.2;
+  handUiHeight = mode === "dock" ? 0.36 : 0.96;
+  handUiPanel.scale.set(handUiWidth / 1.2, handUiHeight / 0.96, 1);
   handUiPanel.visible = mode !== "closed";
   handUiPanel.updateMatrixWorld(true);
   if (openingDock) {
@@ -1255,6 +1295,68 @@ function setHandUiMode(mode, anchorState = null) {
   }
 }
 
+function setPassthroughEnabled(enabled) {
+  if (enabled === passthroughEnabled) return true;
+  if (enabled) {
+    if (!handVideo || handVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      handTrackingStatus.textContent = "Passthrough needs an active camera. Enable hand tracking first.";
+      return false;
+    }
+    passthroughTexture = new THREE.VideoTexture(handVideo);
+    passthroughTexture.colorSpace = THREE.SRGBColorSpace;
+    passthroughTexture.generateMipmaps = false;
+    passthroughTexture.minFilter = THREE.LinearFilter;
+    passthroughTexture.magFilter = THREE.LinearFilter;
+    passthroughMaterial = new THREE.MeshBasicMaterial({
+      map: passthroughTexture,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    passthroughPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), passthroughMaterial);
+    passthroughPlane.renderOrder = -100;
+    passthroughPlane.frustumCulled = false;
+    passthroughPlane.userData.isPassthroughPlane = true;
+    scene.add(passthroughPlane);
+    for (const object of scene.children) {
+      if (object.userData.keepVisibleInPassthrough || object.userData.isPassthroughPlane) continue;
+      object.userData.passthroughPreviousVisibility = object.visible;
+      object.visible = false;
+    }
+    passthroughEnabled = true;
+    updatePassthroughPlane();
+  } else {
+    if (passthroughPlane) {
+      scene.remove(passthroughPlane);
+      passthroughPlane.geometry.dispose();
+      passthroughPlane = undefined;
+    }
+    passthroughMaterial?.dispose();
+    passthroughMaterial = undefined;
+    passthroughTexture?.dispose();
+    passthroughTexture = undefined;
+    for (const object of scene.children) {
+      if (object.userData.passthroughPreviousVisibility === undefined) continue;
+      object.visible = object.userData.passthroughPreviousVisibility;
+      delete object.userData.passthroughPreviousVisibility;
+    }
+    passthroughEnabled = false;
+  }
+  drawHandUi();
+  return true;
+}
+
+function updatePassthroughPlane() {
+  if (!passthroughEnabled || !passthroughPlane || !camera) return;
+  const distance = 0.12;
+  const height = 2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  handCameraBack.set(0, 0, 1).applyQuaternion(camera.quaternion);
+  passthroughPlane.position.copy(camera.position).addScaledVector(handCameraBack, -distance);
+  passthroughPlane.quaternion.copy(camera.quaternion);
+  passthroughPlane.scale.set(height * camera.aspect, height, 1);
+  passthroughPlane.updateMatrixWorld(true);
+}
+
 function drawHandUi() {
   if (!handUiContext || !handUiTexture) return;
   const context = handUiContext;
@@ -1268,7 +1370,7 @@ function drawHandUi() {
   context.textAlign = "left";
 
   if (handUiMode === "dock") {
-    context.fillStyle = "#11151deF";
+    context.fillStyle = "#11151def";
     roundedRectPath(context, 20, 222, 760, 196, 72);
     context.fill();
     const dockGlow = context.createLinearGradient(0, 220, 0, 420);
@@ -1288,9 +1390,20 @@ function drawHandUi() {
     context.fillStyle = "#aeb4c2";
     context.font = "16px sans-serif";
     context.fillText("YOUR SPACE", 52, 338);
-    drawHandDockApp(context, 246, 247, "⌂", "Room", false);
-    drawHandDockApp(context, 430, 247, "⚙", "Settings", true);
-    drawHandDockApp(context, 600, 247, "◎", "Recenter", false);
+    context.fillStyle = "#87909e";
+    context.font = "12px sans-serif";
+    context.fillText("PINCH OR TOUCH", 50, 365);
+    drawHandDockApp(context, 300, 247, "⚙", "Settings", true, "app-settings", "Room controls");
+    drawHandDockApp(
+      context,
+      490,
+      247,
+      "◉",
+      "Passthrough",
+      passthroughEnabled,
+      "dock-passthrough",
+      passthroughEnabled ? "Camera on" : "See your space",
+    );
     context.textAlign = "center";
     context.font = "25px sans-serif";
     context.fillStyle = "#f4f3f0";
@@ -1334,23 +1447,24 @@ function drawHandUi() {
   handUiTexture.needsUpdate = true;
 }
 
-function drawHandDockApp(context, x, y, icon, label, highlighted) {
-  const hovered = handStates.some((state) =>
-    state.touchTarget === (label === "Settings" ? "app-settings" : label === "Recenter" ? "dock-recenter" : "dock-room"),
-  );
-  context.fillStyle = highlighted ? "#b9f3d4" : hovered ? "#e6ebf2" : "#ffffff14";
+function drawHandDockApp(context, x, y, icon, label, selected, target, detail) {
+  const hovered = handStates.some((state) => state.touchTarget === target);
+  context.fillStyle = selected ? "#b9f3d4" : hovered ? "#e6ebf2" : "#ffffff14";
   roundedRectPath(context, x, y, 142, 142, 36);
   context.fill();
-  context.strokeStyle = highlighted ? "#ffffffb0" : "#ffffff30";
+  context.strokeStyle = selected || hovered ? "#ffffffb0" : "#ffffff30";
   context.lineWidth = 2;
   context.stroke();
   context.textAlign = "center";
   context.textBaseline = "middle";
-  context.fillStyle = highlighted ? "#19221e" : "#edf0f4";
+  context.fillStyle = selected ? "#19221e" : "#edf0f4";
   context.font = "42px sans-serif";
   context.fillText(icon, x + 71, y + 54);
-  context.font = "17px sans-serif";
+  context.font = label === "Passthrough" ? "14px sans-serif" : "17px sans-serif";
   context.fillText(label, x + 71, y + 108);
+  context.fillStyle = selected ? "#344840" : "#abb2be";
+  context.font = "11px sans-serif";
+  context.fillText(detail, x + 71, y + 130);
 }
 
 function drawHandUiButton(context, x, y, width, height, icon, title, detail, target) {
@@ -1581,6 +1695,7 @@ function renderFrame() {
     camera.quaternion.setFromEuler(cameraEuler);
   }
 
+  updatePassthroughPlane();
   updateHandTracking();
 
   if (!stereoToggle.checked) {
