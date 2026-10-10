@@ -12,6 +12,7 @@ const publicFiles = new Set([
   "index.html",
   "styles.css",
   "src/main.js",
+  "src/hand-tracking-worker.js",
   "assets/hand_landmarker.task",
   "node_modules/three/build/three.module.js",
   "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs",

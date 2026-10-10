@@ -29,6 +29,9 @@ let rightCamera;
 let animationFrame;
 let handLandmarker;
 let HandLandmarkerClass;
+let handWorker;
+let handWorkerReady = false;
+let handDetectionPending = false;
 let handStream;
 let handVideo;
 let handTrackingActive = false;
@@ -355,13 +358,12 @@ function createScene() {
   leftCamera = new THREE.PerspectiveCamera();
   rightCamera = new THREE.PerspectiveCamera();
 
-  const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
   renderer = new THREE.WebGLRenderer({
-    antialias: !isTouchDevice,
+    antialias: true,
     alpha: false,
     powerPreference: "low-power",
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isTouchDevice ? 1 : 1.5));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.15;
@@ -514,25 +516,28 @@ async function startHandTracking() {
     await playHandVideo();
 
     startupStep = "loading the hand-tracking library";
-    if (!HandLandmarkerClass) {
-      const vision = await import("../node_modules/@mediapipe/tasks-vision/vision_bundle.mjs");
-      HandLandmarkerClass = vision.HandLandmarker;
-    }
-
-    if (!handLandmarker) {
-      startupStep = "initializing the on-device hand model";
-      const wasmFileset = {
-        wasmLoaderPath: new URL("vision_wasm_nosimd_internal.js", HAND_WASM_BASE_URL).href,
-        wasmBinaryPath: new URL("vision_wasm_nosimd_internal.wasm", HAND_WASM_BASE_URL).href,
-      };
-      handLandmarker = await HandLandmarkerClass.createFromOptions(wasmFileset, {
-        baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "CPU" },
-        runningMode: "VIDEO",
-        numHands: 1,
-        minHandDetectionConfidence: 0.55,
-        minHandPresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-      });
+    startupStep = "initializing the on-device hand model";
+    if (typeof Worker === "function" && typeof createImageBitmap === "function") {
+      await startHandWorker();
+    } else {
+      if (!HandLandmarkerClass) {
+        const vision = await import("../node_modules/@mediapipe/tasks-vision/vision_bundle.mjs");
+        HandLandmarkerClass = vision.HandLandmarker;
+      }
+      if (!handLandmarker) {
+        const wasmFileset = {
+          wasmLoaderPath: new URL("vision_wasm_nosimd_internal.js", HAND_WASM_BASE_URL).href,
+          wasmBinaryPath: new URL("vision_wasm_nosimd_internal.wasm", HAND_WASM_BASE_URL).href,
+        };
+        handLandmarker = await HandLandmarkerClass.createFromOptions(wasmFileset, {
+          baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "CPU" },
+          runningMode: "VIDEO",
+          numHands: 1,
+          minHandDetectionConfidence: 0.55,
+          minHandPresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+      }
     }
 
     if (!handTrackingActive) {
@@ -551,6 +556,44 @@ async function startHandTracking() {
     handTrackingButton.textContent = "Enable hand tracking";
     handTrackingStatus.textContent = getHandTrackingErrorMessage(error, startupStep);
   }
+}
+
+function startHandWorker() {
+  handWorkerReady = false;
+  handDetectionPending = false;
+  const worker = new Worker(new URL("./hand-tracking-worker.js", import.meta.url));
+  handWorker = worker;
+
+  return new Promise((resolve, reject) => {
+    worker.onmessage = ({ data }) => {
+      if (worker !== handWorker) return;
+      if (data.type === "ready") {
+        handWorkerReady = true;
+        resolve();
+      } else if (data.type === "error") {
+        const error = new Error(data.message);
+        if (!handWorkerReady) reject(error);
+        else handleHandTrackingFailure(error);
+      } else if (data.type === "result") {
+        handDetectionPending = false;
+        processHandLandmarks(data.landmarks, data.timestamp);
+      }
+    };
+    worker.onerror = (event) => {
+      const error = new Error(event.message || "The hand-tracking worker stopped unexpectedly.");
+      if (!handWorkerReady) reject(error);
+      else handleHandTrackingFailure(error);
+    };
+    worker.postMessage({
+      type: "initialize",
+      modelUrl: HAND_MODEL_URL,
+      visionBundleUrl: new URL(
+        "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs",
+        document.baseURI,
+      ).href,
+      wasmBaseUrl: HAND_WASM_BASE_URL.href,
+    });
+  });
 }
 
 async function playHandVideo() {
@@ -635,6 +678,10 @@ function getHandTrackingErrorMessage(error, startupStep) {
 function stopCameraStream() {
   for (const track of handStream?.getTracks() || []) track.stop();
   handStream = undefined;
+  handWorker?.terminate();
+  handWorker = undefined;
+  handWorkerReady = false;
+  handDetectionPending = false;
   lastHandVideoTime = -1;
   if (handVideo) {
     handVideo.srcObject = null;
@@ -670,7 +717,8 @@ function resetHandOverlays() {
 }
 
 function updateHandTracking() {
-  if (!handTrackingActive || !handLandmarker || !handVideo || handVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+  if (!handTrackingActive || (!handLandmarker && !(handWorker && handWorkerReady)) ||
+      !handVideo || handVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
     return;
   }
   const now = performance.now();
@@ -678,47 +726,73 @@ function updateHandTracking() {
   lastHandFrameTime = now;
   lastHandVideoTime = handVideo.currentTime;
 
+  if (handWorker) {
+    if (handDetectionPending) return;
+    handDetectionPending = true;
+    createImageBitmap(handVideo).then((bitmap) => {
+      if (!handTrackingActive || !handWorker || !handWorkerReady) {
+        bitmap.close();
+        handDetectionPending = false;
+        return;
+      }
+      handWorker.postMessage({ type: "detect", bitmap, timestamp: now }, [bitmap]);
+    }).catch((error) => {
+      handDetectionPending = false;
+      handleHandTrackingFailure(error);
+    });
+    return;
+  }
+
   try {
     const result = handLandmarker.detectForVideo(handVideo, now);
-    const landmarks = result.landmarks[0];
-    if (!landmarks) {
-      handRig.visible = false;
-      handCursor.visible = false;
-      handWasPinching = false;
-      updateHandTouch(null, 0, now);
-      if (handTrackingStatus.textContent !== "Looking for a hand. Move it into the rear camera view.") {
-        handTrackingStatus.textContent = "Looking for a hand. Move it into the rear camera view.";
-      }
-      return;
-    }
-
-    handRig.visible = true;
-    handCursor.visible = true;
-    if (handTrackingStatus.textContent !== "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.") {
-      handTrackingStatus.textContent = "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.";
-    }
-    updateHandPose(landmarks);
-
-    const palmSize = Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
-    const pinchDistance = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y);
-    const isPinching = palmSize > 0 && pinchDistance / palmSize < 0.34;
-    const fingertip = landmarks[8];
-    const touchTarget = getHandTouchTarget(fingertip.x, fingertip.y);
-    updateHandTouch(touchTarget, fingertip.x, now);
-    if (isPinching && !handWasPinching) handleHandPinch(fingertip.x, fingertip.y);
-    handWasPinching = isPinching;
-    handCursor.scale.setScalar(isPinching ? 1.5 : 1);
-    handCursor.material.color.set(
-      handTouchTarget && handTouchActivated ? 0x6de0a0 : isPinching ? 0xffd17c : 0xb9f3d4,
-    );
+    processHandLandmarks(result.landmarks[0], now);
   } catch (error) {
-    console.error("Hand tracking frame failed:", error);
-    handTrackingActive = false;
-    stopCameraStream();
-    resetHandOverlays();
-    handTrackingButton.textContent = "Enable hand tracking";
-    handTrackingStatus.textContent = "Hand tracking paused after an error. Stop it and enable it again.";
+    handleHandTrackingFailure(error);
   }
+}
+
+function processHandLandmarks(landmarks, now) {
+  if (!handTrackingActive) return;
+  if (!landmarks) {
+    handRig.visible = false;
+    handCursor.visible = false;
+    handWasPinching = false;
+    updateHandTouch(null, 0, now);
+    if (handTrackingStatus.textContent !== "Looking for a hand. Move it into the rear camera view.") {
+      handTrackingStatus.textContent = "Looking for a hand. Move it into the rear camera view.";
+    }
+    return;
+  }
+
+  handRig.visible = true;
+  handCursor.visible = true;
+  if (handTrackingStatus.textContent !== "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.") {
+    handTrackingStatus.textContent = "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.";
+  }
+  updateHandPose(landmarks);
+
+  const palmSize = Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
+  const pinchDistance = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y);
+  const isPinching = palmSize > 0 && pinchDistance / palmSize < 0.34;
+  const fingertip = landmarks[8];
+  const touchTarget = getHandTouchTarget(fingertip.x, fingertip.y);
+  updateHandTouch(touchTarget, fingertip.x, now);
+  if (isPinching && !handWasPinching) handleHandPinch(fingertip.x, fingertip.y);
+  handWasPinching = isPinching;
+  handCursor.scale.setScalar(isPinching ? 1.5 : 1);
+  handCursor.material.color.set(
+    handTouchTarget && handTouchActivated ? 0x6de0a0 : isPinching ? 0xffd17c : 0xb9f3d4,
+  );
+}
+
+function handleHandTrackingFailure(error) {
+  console.error("Hand tracking frame failed:", error);
+  handTrackingActive = false;
+  stopCameraStream();
+  resetHandOverlays();
+  handTrackingButton.disabled = false;
+  handTrackingButton.textContent = "Enable hand tracking";
+  handTrackingStatus.textContent = "Hand tracking paused after an error. Stop it and enable it again.";
 }
 
 function screenPointToWorld(x, y, depth, zOffset = 0) {

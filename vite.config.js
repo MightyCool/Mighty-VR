@@ -16,10 +16,15 @@ function copyHandTrackingAssets() {
     apply: "build",
     async closeBundle() {
       const wasmOutput = resolve(outputRoot, "node_modules/@mediapipe/tasks-vision/wasm");
+      const visionBundleOutput = resolve(outputRoot, "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs");
       const modelOutput = resolve(outputRoot, "assets/hand_landmarker.task");
       await mkdir(wasmOutput, { recursive: true });
       await mkdir(dirname(modelOutput), { recursive: true });
       await Promise.all([
+        copyFile(
+          resolve(projectRoot, "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs"),
+          visionBundleOutput,
+        ),
         copyFile(`${wasmSource}.js`, resolve(wasmOutput, "vision_wasm_nosimd_internal.js")),
         copyFile(`${wasmSource}.wasm`, resolve(wasmOutput, "vision_wasm_nosimd_internal.wasm")),
         copyFile(resolve(projectRoot, "assets/hand_landmarker.task"), modelOutput),
