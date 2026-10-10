@@ -30,11 +30,13 @@ self.onmessage = async ({ data }) => {
 
   if (data.type === "detect") {
     try {
+      const startedAt = performance.now();
       const result = handLandmarker.detectForVideo(data.bitmap, data.timestamp);
       self.postMessage({
         type: "result",
         landmarks: result.landmarks[0] || null,
         timestamp: data.timestamp,
+        inferenceMs: performance.now() - startedAt,
       });
     } catch (error) {
       self.postMessage({

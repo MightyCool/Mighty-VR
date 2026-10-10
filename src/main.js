@@ -38,6 +38,9 @@ let handTrackingActive = false;
 let handVideoPlaybackPending = false;
 let lastHandFrameTime = 0;
 let lastHandVideoTime = -1;
+let handFrameIntervalMs = 100;
+let handInferenceMs = 0;
+let handInputWidth = 320;
 let handWasPinching = false;
 let handRig;
 let handJoints;
@@ -453,6 +456,9 @@ async function startHandTracking() {
 
   let startupStep = "requesting camera access";
   handTrackingActive = true;
+  handFrameIntervalMs = 100;
+  handInferenceMs = 0;
+  handInputWidth = 320;
   handTrackingButton.disabled = true;
   handTrackingButton.textContent = "Starting…";
   handTrackingStatus.textContent = "Requesting rear-camera access. Allow the camera prompt to continue.";
@@ -552,10 +558,7 @@ async function startHandTracking() {
 }
 
 function canUseHandTrackingWorker() {
-  const isIOS =
-    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  return !isIOS && typeof Worker === "function" && typeof createImageBitmap === "function";
+  return typeof Worker === "function" && typeof createImageBitmap === "function";
 }
 
 async function initializeHandTrackerOnMainThread() {
@@ -594,16 +597,17 @@ function startHandWorker() {
       } else if (data.type === "error") {
         const error = new Error(data.message);
         if (!handWorkerReady) reject(error);
-        else handleHandTrackingFailure(error);
+        else fallbackFromHandWorker(error);
       } else if (data.type === "result") {
         handDetectionPending = false;
+        updateHandFrameInterval(Math.max(data.inferenceMs, performance.now() - data.timestamp), true);
         processHandLandmarks(data.landmarks, data.timestamp);
       }
     };
     worker.onerror = (event) => {
       const error = new Error(event.message || "The hand-tracking worker stopped unexpectedly.");
       if (!handWorkerReady) reject(error);
-      else handleHandTrackingFailure(error);
+      else fallbackFromHandWorker(error);
     };
     worker.postMessage({
       type: "initialize",
@@ -615,6 +619,38 @@ function startHandWorker() {
       wasmBaseUrl: HAND_WASM_BASE_URL.href,
     });
   });
+}
+
+async function fallbackFromHandWorker(error) {
+  if (!handWorker) return;
+  console.warn("Hand-tracking worker stopped; using the compatible local tracker:", error);
+  handWorker.terminate();
+  handWorker = undefined;
+  handWorkerReady = false;
+  handDetectionPending = false;
+  if (!handTrackingActive) return;
+
+  try {
+    handTrackingStatus.textContent = "Preparing the compatible on-device hand tracker.";
+    await initializeHandTrackerOnMainThread();
+    handFrameIntervalMs = Math.max(100, handFrameIntervalMs);
+    lastHandFrameTime = 0;
+  } catch (fallbackError) {
+    handleHandTrackingFailure(fallbackError);
+  }
+}
+
+function updateHandFrameInterval(inferenceMs, useWorker) {
+  if (!Number.isFinite(inferenceMs) || inferenceMs < 0) return;
+  handInferenceMs = handInferenceMs === 0 ? inferenceMs : handInferenceMs * 0.75 + inferenceMs * 0.25;
+  if (useWorker) {
+    if (handInferenceMs > 120) handInputWidth = 256;
+    else if (handInferenceMs < 85) handInputWidth = 320;
+  }
+  const minimumInterval = useWorker ? 17 : 100;
+  const maximumInterval = useWorker ? 250 : 500;
+  const headroom = useWorker ? 1.5 : 2;
+  handFrameIntervalMs = Math.min(maximumInterval, Math.max(minimumInterval, Math.ceil(handInferenceMs * headroom)));
 }
 
 async function playHandVideo() {
@@ -703,6 +739,9 @@ function stopCameraStream() {
   handWorker = undefined;
   handWorkerReady = false;
   handDetectionPending = false;
+  handFrameIntervalMs = 100;
+  handInferenceMs = 0;
+  handInputWidth = 320;
   lastHandVideoTime = -1;
   if (handVideo) {
     handVideo.srcObject = null;
@@ -743,14 +782,14 @@ function updateHandTracking() {
     return;
   }
   const now = performance.now();
-  if (now - lastHandFrameTime < 100 || handVideo.currentTime === lastHandVideoTime) return;
+  if (now - lastHandFrameTime < handFrameIntervalMs || handVideo.currentTime === lastHandVideoTime) return;
   lastHandFrameTime = now;
   lastHandVideoTime = handVideo.currentTime;
 
   if (handWorker) {
     if (handDetectionPending) return;
     handDetectionPending = true;
-    createImageBitmap(handVideo).then((bitmap) => {
+    createHandTrackingBitmap(handVideo).then((bitmap) => {
       if (!handTrackingActive || !handWorker || !handWorkerReady) {
         bitmap.close();
         handDetectionPending = false;
@@ -759,16 +798,33 @@ function updateHandTracking() {
       handWorker.postMessage({ type: "detect", bitmap, timestamp: now }, [bitmap]);
     }).catch((error) => {
       handDetectionPending = false;
-      handleHandTrackingFailure(error);
+      fallbackFromHandWorker(error);
     });
     return;
   }
 
   try {
+    const startedAt = performance.now();
     const result = handLandmarker.detectForVideo(handVideo, now);
+    updateHandFrameInterval(performance.now() - startedAt, false);
     processHandLandmarks(result.landmarks[0], now);
   } catch (error) {
     handleHandTrackingFailure(error);
+  }
+}
+
+async function createHandTrackingBitmap(video) {
+  if (handInputWidth >= 320) return createImageBitmap(video);
+  try {
+    return await createImageBitmap(video, {
+      resizeWidth: handInputWidth,
+      resizeHeight: handInputWidth * 0.75,
+      resizeQuality: "low",
+    });
+  } catch (error) {
+    console.warn("Could not resize the hand-tracking frame; using the camera frame size:", error);
+    handInputWidth = 320;
+    return createImageBitmap(video);
   }
 }
 
