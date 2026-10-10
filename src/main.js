@@ -48,13 +48,13 @@ let handProfileDroppedFrames = 0;
 let handFlightVideoTime = 0;
 let handCameraFrameRate = 30;
 let handStates = [];
-let handLogo;
-let handLogoTexture;
 let handUiPanel;
 let handUiCanvas;
 let handUiContext;
 let handUiTexture;
 let handUiMode = "closed";
+let handUiWidth = 1.2;
+let handUiHeight = 0.96;
 let lastHandUiActivation = "";
 let lastHandUiActivationAt = 0;
 let orientationAvailable = typeof window.DeviceOrientationEvent === "function";
@@ -86,7 +86,6 @@ const handInstanceMatrix = new THREE.Matrix4();
 const handSegmentQuaternion = new THREE.Quaternion();
 const handIdentityQuaternion = new THREE.Quaternion();
 const handPanelPoint = new THREE.Vector3();
-const handLogoPoint = new THREE.Vector3();
 const supportsWasmSimd = (() => {
   if (typeof WebAssembly === "undefined") return false;
   const simdTest = new Uint8Array([
@@ -455,6 +454,7 @@ function buildHandOverlay() {
       previousDepth: 0,
       poseInitialized: false,
       wasPinching: false,
+      wasFist: false,
       touchTarget: null,
       touchStartedAt: 0,
       touchActivated: false,
@@ -462,35 +462,6 @@ function buildHandOverlay() {
       visible: false,
     };
   });
-
-  const logoCanvas = document.createElement("canvas");
-  logoCanvas.width = 256;
-  logoCanvas.height = 128;
-  const logoContext = logoCanvas.getContext("2d");
-  logoContext.fillStyle = "#171a22";
-  roundedRectPath(logoContext, 4, 4, 248, 120, 30);
-  logoContext.fill();
-  logoContext.strokeStyle = "#b9f3d4";
-  logoContext.lineWidth = 5;
-  logoContext.stroke();
-  logoContext.fillStyle = "#b9f3d4";
-  logoContext.font = "600 52px sans-serif";
-  logoContext.textAlign = "center";
-  logoContext.textBaseline = "middle";
-  logoContext.fillText("◉ MVR", 128, 64);
-  handLogoTexture = new THREE.CanvasTexture(logoCanvas);
-  handLogo = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.2, 0.1),
-    new THREE.MeshBasicMaterial({
-      map: handLogoTexture,
-      transparent: true,
-      depthTest: true,
-      depthWrite: false,
-    }),
-  );
-  handLogo.visible = false;
-  handLogo.renderOrder = 16;
-  scene.add(handLogo);
 
   handUiCanvas = document.createElement("canvas");
   handUiCanvas.width = 800;
@@ -617,7 +588,7 @@ async function startHandTracking() {
     }
     handTrackingButton.disabled = false;
     handTrackingButton.textContent = "Stop hand tracking";
-    handTrackingStatus.textContent = "Rear camera active. Show one or both hands; the MVR logo stays attached to your right hand.";
+    handTrackingStatus.textContent = "Rear camera active. Show one or both hands, then curl your fingers (leave your thumb out) to open the app dock.";
     drawHandUi();
   } catch (error) {
     console.error("Unable to start hand tracking:", error);
@@ -872,17 +843,20 @@ function resetHandOverlays() {
     state.cursor.visible = false;
     state.visible = false;
     state.wasPinching = false;
+    state.wasFist = false;
     state.touchTarget = null;
     state.touchStartedAt = 0;
     state.touchActivated = false;
     state.requiresRelease = false;
     state.poseInitialized = false;
   }
-  handLogo && (handLogo.visible = false);
   handUiMode = "closed";
   lastHandUiActivation = "";
   lastHandUiActivationAt = 0;
   handUiPanel && (handUiPanel.visible = false);
+  handUiPanel?.scale.set(1, 1, 1);
+  handUiWidth = 1.2;
+  handUiHeight = 0.96;
   drawHandUi();
 }
 
@@ -996,19 +970,8 @@ function processHandLandmarks(hands, handedness, now) {
     }
   }
 
-  const rightHand = handStates.find((state) => state.side === "right");
-  handLogo.visible = Boolean(rightHand?.visible);
-  if (rightHand?.visible) {
-    handLogo.position.copy(rightHand.points[9]).addScaledVector(handCameraBack, -0.025);
-    handLogo.quaternion.copy(camera.quaternion);
-  }
-
   handUiPanel.visible = handUiMode !== "closed";
-  if (handUiPanel.visible) {
-    handUiPanel.position.copy(screenPointToWorld(0.5, 0.5, 0.9));
-    handUiPanel.quaternion.copy(camera.quaternion);
-    handUiPanel.updateMatrixWorld(true);
-  }
+  handUiPanel.updateMatrixWorld(true);
 
   let visibleHands = 0;
   for (const state of handStates) {
@@ -1024,25 +987,29 @@ function processHandLandmarks(hands, handedness, now) {
       landmarks[4].y - landmarks[8].y,
     );
     const isPinching = palmSize > 0 && pinchDistance / palmSize < 0.34;
+    const isFist = isHandFist(landmarks, palmSize);
+    if (isFist && !state.wasFist) activateHandTarget("toggle-dock", now, state);
+    state.wasFist = isFist;
+
     const touchTarget = getHandTouchTarget(state, state.points[8]);
     updateHandTouch(state, touchTarget, now);
     if (isPinching && !state.wasPinching) {
       if (touchTarget && !state.touchActivated) {
         state.touchActivated = true;
-        activateHandTarget(touchTarget, now);
-      } else if (state.side === "right" && handUiMode === "closed") {
-        activateHandTarget("mvr-logo", now);
+        activateHandTarget(touchTarget, now, state);
       }
     }
     state.wasPinching = isPinching;
     state.cursor.scale.setScalar(isPinching ? 1.5 : 1);
     state.cursor.material.color.set(
-      state.touchTarget && state.touchActivated ? 0x6de0a0 : isPinching ? 0xffd17c : 0xb9f3d4,
+      isFist ? 0xf0a878 : state.touchTarget && state.touchActivated
+        ? 0x6de0a0
+        : isPinching ? 0xffd17c : 0xb9f3d4,
     );
   }
 
   const status = visibleHands
-    ? `${visibleHands} hand${visibleHands === 1 ? "" : "s"} tracked. Touch the MVR logo to open the app menu, then touch Settings.`
+    ? `${visibleHands} hand${visibleHands === 1 ? "" : "s"} tracked. Curl your four fingers, leaving your thumb out, to open the floating dock.`
     : "Looking for hands. Move one or both into the rear camera view.";
   if (handTrackingStatus.textContent !== status) handTrackingStatus.textContent = status;
 }
@@ -1066,6 +1033,20 @@ function screenPointToWorld(x, y, depth, zOffset = 0) {
     .addScaledVector(handCameraUp, (0.5 - y) * viewHeight)
     .addScaledVector(handCameraBack, -depth + zOffset);
   return handWorldPoint;
+}
+
+function isHandFist(landmarks, palmSize) {
+  if (palmSize < 0.001) return false;
+  const wrist = landmarks[0];
+  let curledFingers = 0;
+  for (const [pipIndex, tipIndex] of [[6, 8], [10, 12], [14, 16], [18, 20]]) {
+    const pip = landmarks[pipIndex];
+    const tip = landmarks[tipIndex];
+    const pipDistance = Math.hypot(pip.x - wrist.x, pip.y - wrist.y);
+    const tipDistance = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
+    if (tipDistance < pipDistance + palmSize * 0.18) curledFingers += 1;
+  }
+  return curledFingers === 4;
 }
 
 function updateHandPose(state, landmarks, palmSize) {
@@ -1144,33 +1125,23 @@ function updateHandPose(state, landmarks, palmSize) {
 }
 
 function getHandTouchTarget(state, fingertip) {
-  if (handLogo.visible) {
-    handLogoPoint.copy(fingertip);
-    handLogo.worldToLocal(handLogoPoint);
-    if (
-      Math.abs(handLogoPoint.z) < 0.055 &&
-      Math.abs(handLogoPoint.x) <= 0.1 &&
-      Math.abs(handLogoPoint.y) <= 0.05
-    ) {
-      return "mvr-logo";
-    }
-  }
   if (!handUiPanel.visible) return null;
 
   handPanelPoint.copy(fingertip);
   handUiPanel.worldToLocal(handPanelPoint);
   if (
     Math.abs(handPanelPoint.z) > 0.07 ||
-    Math.abs(handPanelPoint.x) > 0.6 ||
-    Math.abs(handPanelPoint.y) > 0.48
+    Math.abs(handPanelPoint.x) > handUiWidth / 2 ||
+    Math.abs(handPanelPoint.y) > handUiHeight / 2
   ) {
     return null;
   }
-  const x = (handPanelPoint.x / 1.2 + 0.5) * handUiCanvas.width;
-  const y = (0.5 - handPanelPoint.y / 0.96) * handUiCanvas.height;
-  if (handUiMode === "menu") {
-    if (x >= 705 && y >= 220 && y <= 420) return "app-close";
-    if (x >= 300 && x <= 540 && y >= 220 && y <= 420) return "app-settings";
+  const x = (handPanelPoint.x / handUiWidth + 0.5) * handUiCanvas.width;
+  const y = (0.5 - handPanelPoint.y / handUiHeight) * handUiCanvas.height;
+  if (handUiMode === "dock") {
+    if (x >= 715 && y >= 250 && y <= 390) return "dock-close";
+    if (x >= 425 && x <= 585 && y >= 250 && y <= 390) return "app-settings";
+    if (x >= 590 && x <= 705 && y >= 250 && y <= 390) return "dock-recenter";
     return null;
   }
   if (x >= 715 && y <= 95) return "settings-close";
@@ -1206,19 +1177,23 @@ function updateHandTouch(state, target, now) {
   activateHandTarget(target, now);
 }
 
-function activateHandTarget(target, now = performance.now()) {
+function activateHandTarget(target, now = performance.now(), state = null) {
   if (target === lastHandUiActivation && now - lastHandUiActivationAt < 100) return;
   lastHandUiActivation = target;
   lastHandUiActivationAt = now;
   const previousMode = handUiMode;
-  if (target === "mvr-logo") {
-    handUiMode = handUiMode === "closed" ? "menu" : "closed";
-  } else if (target === "app-close" || target === "settings-close") {
-    handUiMode = "closed";
+  if (target === "toggle-dock") {
+    setHandUiMode(handUiMode === "closed" ? "dock" : "closed", state);
+  } else if (target === "dock-close" || target === "settings-close") {
+    setHandUiMode("closed");
   } else if (target === "app-settings") {
-    handUiMode = "settings";
+    setHandUiMode("settings");
+  } else if (target === "dock-recenter") {
+    recenterView();
+  } else if (target === "dock-room") {
+    setHandUiMode("closed");
   } else if (target === "settings-back") {
-    handUiMode = "menu";
+    setHandUiMode("dock");
   } else if (target === "setting-motion") {
     if (
       typeof window.DeviceOrientationEvent?.requestPermission === "function" &&
@@ -1255,6 +1230,31 @@ function activateHandTarget(target, now = performance.now()) {
   drawHandUi();
 }
 
+function setHandUiMode(mode, anchorState = null) {
+  const openingDock = mode === "dock" && handUiMode === "closed";
+  handUiMode = mode;
+  handUiWidth = 1.2;
+  handUiHeight = mode === "dock" ? 0.34 : 0.96;
+  handUiPanel.scale.set(1, handUiHeight / 0.96, 1);
+  handUiPanel.visible = mode !== "closed";
+  handUiPanel.updateMatrixWorld(true);
+  if (openingDock) {
+    handCameraRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+    handCameraUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+    handCameraBack.set(0, 0, 1).applyQuaternion(camera.quaternion);
+    if (anchorState?.visible) {
+      handUiPanel.position
+        .copy(anchorState.points[9])
+        .addScaledVector(handCameraUp, 0.2)
+        .addScaledVector(handCameraBack, -0.15);
+    } else {
+      handUiPanel.position.copy(screenPointToWorld(0.5, 0.56, 0.9));
+    }
+    handUiPanel.quaternion.copy(camera.quaternion);
+    handUiPanel.updateMatrixWorld(true);
+  }
+}
+
 function drawHandUi() {
   if (!handUiContext || !handUiTexture) return;
   const context = handUiContext;
@@ -1267,23 +1267,34 @@ function drawHandUi() {
   context.fillStyle = "#b9f3d4";
   context.textAlign = "left";
 
-  if (handUiMode === "menu") {
-    context.fillStyle = "#10141ef2";
-    roundedRectPath(context, 8, 220, 784, 200, 34);
+  if (handUiMode === "dock") {
+    context.fillStyle = "#11151deF";
+    roundedRectPath(context, 20, 222, 760, 196, 72);
     context.fill();
-    context.strokeStyle = "#b9f3d4";
-    context.lineWidth = 3;
+    const dockGlow = context.createLinearGradient(0, 220, 0, 420);
+    dockGlow.addColorStop(0, "#d6d9e822");
+    dockGlow.addColorStop(0.5, "#ffffff08");
+    dockGlow.addColorStop(1, "#00000020");
+    context.fillStyle = dockGlow;
+    roundedRectPath(context, 23, 225, 754, 190, 68);
+    context.fill();
+    context.strokeStyle = "#dbe5ee75";
+    context.lineWidth = 2;
     context.stroke();
-    context.font = "600 34px sans-serif";
-    context.fillText("MVR", 48, 282);
+    context.textAlign = "left";
+    context.fillStyle = "#b9f3d4";
+    context.font = "600 24px sans-serif";
+    context.fillText("MVR", 52, 300);
     context.fillStyle = "#aeb4c2";
-    context.font = "20px sans-serif";
-    context.fillText("APP MENU", 48, 320);
-    drawHandUiButton(context, 300, 230, 240, 180, "⚙", "Settings", "Room & headset", "app-settings");
+    context.font = "16px sans-serif";
+    context.fillText("YOUR SPACE", 52, 338);
+    drawHandDockApp(context, 246, 247, "⌂", "Room", false);
+    drawHandDockApp(context, 430, 247, "⚙", "Settings", true);
+    drawHandDockApp(context, 600, 247, "◎", "Recenter", false);
     context.textAlign = "center";
-    context.font = "32px sans-serif";
+    context.font = "25px sans-serif";
     context.fillStyle = "#f4f3f0";
-    context.fillText("×", 750, 280);
+    context.fillText("×", 748, 260);
   } else {
     context.fillStyle = "#10141ef2";
     roundedRectPath(context, 8, 8, 784, 624, 34);
@@ -1321,6 +1332,25 @@ function drawHandUi() {
     drawHandUiButton(context, 34, 545, 732, 80, "◎", "Recenter view", "Reset your look direction", "setting-recenter");
   }
   handUiTexture.needsUpdate = true;
+}
+
+function drawHandDockApp(context, x, y, icon, label, highlighted) {
+  const hovered = handStates.some((state) =>
+    state.touchTarget === (label === "Settings" ? "app-settings" : label === "Recenter" ? "dock-recenter" : "dock-room"),
+  );
+  context.fillStyle = highlighted ? "#b9f3d4" : hovered ? "#e6ebf2" : "#ffffff14";
+  roundedRectPath(context, x, y, 142, 142, 36);
+  context.fill();
+  context.strokeStyle = highlighted ? "#ffffffb0" : "#ffffff30";
+  context.lineWidth = 2;
+  context.stroke();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillStyle = highlighted ? "#19221e" : "#edf0f4";
+  context.font = "42px sans-serif";
+  context.fillText(icon, x + 71, y + 54);
+  context.font = "17px sans-serif";
+  context.fillText(label, x + 71, y + 108);
 }
 
 function drawHandUiButton(context, x, y, width, height, icon, title, detail, target) {
