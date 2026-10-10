@@ -1,4 +1,5 @@
 import * as THREE from "../node_modules/three/build/three.module.js";
+import { CSS3DObject, CSS3DRenderer } from "../node_modules/three/examples/jsm/renderers/CSS3DRenderer.js";
 
 const homeScreen = document.querySelector("#home-screen");
 const demoScreen = document.querySelector("#demo-screen");
@@ -23,6 +24,7 @@ const handTrackingStatus = document.querySelector("#hand-tracking-status");
 const handTrackingPerformance = document.querySelector("#hand-tracking-performance");
 
 let renderer;
+let browserRenderer;
 let scene;
 let camera;
 let leftCamera;
@@ -49,6 +51,14 @@ let handFlightVideoTime = 0;
 let handCameraFrameRate = 30;
 let handStates = [];
 let handUiPanel;
+let handDockPanel;
+let handDockCanvas;
+let handDockContext;
+let handDockTexture;
+let browserViewport;
+let browserFrame;
+let browserObject;
+let handUiDrag;
 let handUiCanvas;
 let handUiContext;
 let handUiTexture;
@@ -57,6 +67,9 @@ let handUiWidth = 1.2;
 let handUiHeight = 0.96;
 let handAppScaleStep = 0;
 let handBrowserQuery = "";
+let handBrowserUrl = "";
+let handBrowserHistory = [];
+let handBrowserHistoryIndex = -1;
 let lastHandUiActivation = "";
 let lastHandUiActivationAt = 0;
 let passthroughEnabled = false;
@@ -398,6 +411,10 @@ function createScene() {
   renderer.toneMappingExposure = 1.15;
   stage.prepend(renderer.domElement);
 
+  browserRenderer = new CSS3DRenderer();
+  browserRenderer.domElement.className = "browser-3d-layer";
+  stage.append(browserRenderer.domElement);
+
   buildRoom();
   buildDecor();
   buildHandOverlay();
@@ -491,7 +508,45 @@ function buildHandOverlay() {
   handUiPanel.renderOrder = 12;
   handUiPanel.userData.keepVisibleInPassthrough = true;
   scene.add(handUiPanel);
+
+  const browserElement = document.createElement("iframe");
+  browserElement.className = "browser-3d-frame";
+  browserElement.title = "Webpage in the VR Browser app";
+  browserElement.referrerPolicy = "no-referrer";
+  browserElement.allow = "autoplay; fullscreen; picture-in-picture";
+  browserElement.src = "about:blank";
+  browserViewport = document.createElement("div");
+  browserViewport.className = "browser-3d-viewport";
+  browserViewport.append(browserElement);
+  browserFrame = browserElement;
+  browserObject = new CSS3DObject(browserViewport);
+  browserObject.position.set((400 / 800 - 0.5) * 1.2, (0.5 - 260 / 640) * 0.96, 0.012);
+  browserObject.scale.set(1.2 / 800, 0.96 / 640, 1);
+  browserObject.visible = false;
+  handUiPanel.add(browserObject);
+
+  handDockCanvas = document.createElement("canvas");
+  handDockCanvas.width = 800;
+  handDockCanvas.height = 160;
+  handDockContext = handDockCanvas.getContext("2d");
+  handDockTexture = new THREE.CanvasTexture(handDockCanvas);
+  handDockPanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.2, 0.24),
+    new THREE.MeshBasicMaterial({
+      map: handDockTexture,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+    }),
+  );
+  handDockPanel.scale.set(0.75, 0.75, 1);
+  handDockPanel.visible = false;
+  handDockPanel.renderOrder = 12;
+  handDockPanel.userData.keepVisibleInPassthrough = true;
+  scene.add(handDockPanel);
+
   drawHandUi();
+  drawHandDockBar();
 }
 
 async function startHandTracking() {
@@ -865,14 +920,19 @@ function resetHandOverlays() {
     state.poseInitialized = false;
   }
   handUiMode = "closed";
+  handUiDrag = undefined;
+  stage.classList.remove("is-browser-active");
   lastHandUiActivation = "";
   lastHandUiActivationAt = 0;
   handUiPanel && (handUiPanel.visible = false);
+  handDockPanel && (handDockPanel.visible = false);
+  browserObject && (browserObject.visible = false);
   handUiPanel?.scale.set(1, 1, 1);
   handUiWidth = 1.2;
   handUiHeight = 0.96;
   handAppScaleStep = 0;
   drawHandUi();
+  drawHandDockBar();
 }
 
 function updateHandTracking() {
@@ -980,6 +1040,7 @@ function processHandLandmarks(hands, handedness, now) {
       );
       updateHandPose(state, landmarks, palmSize);
     } else {
+      if (handUiDrag?.state === state) handUiDrag = undefined;
       state.wasPinching = false;
       state.wasFist = false;
       state.fistFrames = 0;
@@ -1023,9 +1084,13 @@ function processHandLandmarks(hands, handedness, now) {
     }
 
     const touchTarget = getHandTouchTarget(state, state.points[8]);
-    updateHandTouch(state, touchTarget, now);
+    updateHandTouch(state, touchTarget === "window-drag" ? null : touchTarget, now);
+    updateHandUiDrag(state, isPinching);
     if (isPinching && !state.wasPinching && !state.requiresRelease) {
-      if (touchTarget && !state.touchActivated) {
+      if (touchTarget === "window-drag") {
+        startHandUiDrag(state);
+        updateHandUiDrag(state, true);
+      } else if (touchTarget && !state.touchActivated) {
         state.touchActivated = true;
         activateHandTarget(touchTarget, now, state);
       }
@@ -1171,6 +1236,29 @@ function updateHandPose(state, landmarks, palmSize) {
 function getHandTouchTarget(state, fingertip) {
   if (!handUiPanel.visible) return null;
 
+  if (handDockPanel.visible) {
+    handPanelPoint.copy(fingertip);
+    handDockPanel.worldToLocal(handPanelPoint);
+    if (
+      Math.abs(handPanelPoint.z) <= 0.12 &&
+      Math.abs(handPanelPoint.x) <= 0.6 &&
+      Math.abs(handPanelPoint.y) <= 0.12
+    ) {
+      const dockX = (handPanelPoint.x / 1.2 + 0.5) * handDockCanvas.width;
+      const dockY = (0.5 - handPanelPoint.y / 0.24) * handDockCanvas.height;
+      if (dockY >= 112 && dockX >= 350 && dockX <= 450) return "window-drag";
+      if (dockY >= 35 && dockY <= 120) {
+        if (dockX >= 210 && dockX <= 320) return "app-settings";
+        if (dockX >= 330 && dockX <= 440) return "dock-passthrough";
+        if (dockX >= 450 && dockX <= 560) return "app-browser";
+        if (dockX >= 570 && dockX <= 680) return "app-close-menu";
+      }
+      if (dockY >= 122 && dockY <= 152 && dockX >= 350 && dockX <= 450) {
+        return "window-drag";
+      }
+    }
+  }
+
   handPanelPoint.copy(fingertip);
   handUiPanel.worldToLocal(handPanelPoint);
   if (
@@ -1194,22 +1282,25 @@ function getHandTouchTarget(state, fingertip) {
   if (x >= 720 && y <= 95) return "settings-close";
   if (x <= 165 && y <= 100) return "settings-back";
   if (handUiMode === "browser") {
-    if (y >= 120 && y <= 195) return "browser-open";
-    if (y >= 205 && y <= 265) {
+    if (y >= 108 && y <= 160) {
+      if (x >= 34 && x < 80) return "browser-back";
+      if (x >= 80 && x < 126) return "browser-forward";
+      if (x >= 680 && x <= 766) return "browser-open";
+    }
+    if (y >= 370 && y <= 420) {
       if (x >= 34 && x < 278) return "browser-google";
       if (x >= 278 && x < 522) return "browser-youtube";
       if (x >= 522 && x <= 766) return "browser-wikipedia";
     }
-    if (y >= 300 && y <= 345) return getBrowserKeyTarget(x, y, "qwertyuiop", 80, 56, 8);
-    if (y >= 350 && y <= 395) return getBrowserKeyTarget(x, y, "asdfghjkl", 112, 56, 8);
-    if (y >= 400 && y <= 445) {
-      if (x >= 650 && x <= 760) return "browser-backspace";
-      return getBrowserKeyTarget(x, y, "zxcvbnm", 168, 56, 8);
-    }
-    if (y >= 450 && y <= 510) {
-      if (x >= 110 && x < 230) return "browser-clear";
-      if (x >= 250 && x < 550) return "browser-space";
-      if (x >= 570 && x < 720) return "browser-open";
+    if (y >= 425 && y <= 460) return getBrowserKeyTarget(x, y, "qwertyuiop", 80, 56, 8);
+    if (y >= 464 && y <= 499) return getBrowserKeyTarget(x, y, "asdfghjkl", 112, 56, 8);
+    if (y >= 503 && y <= 538) return getBrowserKeyTarget(x, y, "zxcvbnm.-/", 80, 56, 8);
+    if (y >= 542 && y <= 577) return getBrowserKeyTarget(x, y, "1234567890", 80, 56, 8);
+    if (y >= 581 && y <= 630) {
+      if (x >= 34 && x < 150) return "browser-backspace";
+      if (x >= 160 && x < 265) return "browser-clear";
+      if (x >= 275 && x < 545) return "browser-space";
+      if (x >= 555 && x < 766) return "browser-open";
     }
     return null;
   }
@@ -1237,11 +1328,12 @@ function updateHandTouch(state, target, now) {
     state.touchStartedAt = now;
     state.touchActivated = false;
     if (target) drawHandUi();
+    if (target) drawHandDockBar();
     return;
   }
   if (!target || state.touchActivated || now - state.touchStartedAt < 140) return;
   state.touchActivated = true;
-  activateHandTarget(target, now);
+  activateHandTarget(target, now, state);
 }
 
 function activateHandTarget(target, now = performance.now(), state = null) {
@@ -1260,21 +1352,25 @@ function activateHandTarget(target, now = performance.now(), state = null) {
   } else if (target === "app-resize") {
     handAppScaleStep = (handAppScaleStep + 1) % 3;
     updateHandUiPanelSize();
+    syncHandDockPosition();
     for (const state of handStates) state.requiresRelease = true;
   } else if (target === "app-browser") {
     setHandUiMode("browser");
+    if (!handBrowserUrl) openHandBrowserUrl("https://www.google.com/webhp?igu=1");
   } else if (target === "browser-open") {
-    openHandBrowserUrl(
-      handBrowserQuery.trim()
-        ? `https://www.google.com/search?q=${encodeURIComponent(handBrowserQuery.trim())}`
-        : "https://www.google.com/",
-    );
+    openBrowserQuery();
   } else if (target === "browser-google") {
-    openHandBrowserUrl("https://www.google.com/");
+    openHandBrowserUrl("https://www.google.com/webhp?igu=1");
   } else if (target === "browser-youtube") {
     openHandBrowserUrl("https://www.youtube.com/");
   } else if (target === "browser-wikipedia") {
     openHandBrowserUrl("https://www.wikipedia.org/");
+  } else if (target === "browser-back") {
+    navigateHandBrowserHistory(-1);
+  } else if (target === "browser-forward") {
+    navigateHandBrowserHistory(1);
+  } else if (target === "window-drag" && state) {
+    startHandUiDrag(state);
   } else if (target.startsWith("browser-key-")) {
     handBrowserQuery += target.slice("browser-key-".length);
   } else if (target === "browser-space") {
@@ -1321,7 +1417,11 @@ function activateHandTarget(target, now = performance.now(), state = null) {
     for (const state of handStates) state.requiresRelease = true;
   }
   handUiPanel.visible = handUiMode !== "closed";
+  handDockPanel.visible = handUiMode === "settings" || handUiMode === "browser";
+  if (browserObject) browserObject.visible = handUiMode === "browser";
+  syncHandDockPosition();
   drawHandUi();
+  drawHandDockBar();
 }
 
 function getBrowserKeyTarget(x, y, keys, startX, keyWidth, gap) {
@@ -1333,12 +1433,78 @@ function getBrowserKeyTarget(x, y, keys, startX, keyWidth, gap) {
 }
 
 function openHandBrowserUrl(url) {
-  window.location.assign(url);
+  if (handBrowserHistory[handBrowserHistoryIndex] !== url) {
+    handBrowserHistory = handBrowserHistory.slice(0, handBrowserHistoryIndex + 1);
+    handBrowserHistory.push(url);
+    handBrowserHistoryIndex = handBrowserHistory.length - 1;
+  }
+  handBrowserUrl = url;
+  if (browserFrame && browserFrame.src !== url) browserFrame.src = url;
+  drawHandUi();
+}
+
+function navigateHandBrowserHistory(direction) {
+  const nextIndex = handBrowserHistoryIndex + direction;
+  if (nextIndex < 0 || nextIndex >= handBrowserHistory.length) return;
+  handBrowserHistoryIndex = nextIndex;
+  handBrowserUrl = handBrowserHistory[handBrowserHistoryIndex];
+  if (browserFrame && browserFrame.src !== handBrowserUrl) browserFrame.src = handBrowserUrl;
+  drawHandUi();
+}
+
+function openBrowserQuery() {
+  const value = handBrowserQuery.trim();
+  if (!value) {
+    openHandBrowserUrl("https://www.google.com/webhp?igu=1");
+    return;
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    openHandBrowserUrl(value);
+  } else if (/^[\w-]+(\.[\w-]+)+([/:?#].*)?$/i.test(value) && !/\s/.test(value)) {
+    openHandBrowserUrl(`https://${value}`);
+  } else {
+    openHandBrowserUrl(`https://www.google.com/search?igu=1&q=${encodeURIComponent(value)}`);
+  }
+}
+
+function startHandUiDrag(state) {
+  handUiDrag = {
+    state,
+    startPoint: state.points[8].clone(),
+    startPosition: handUiPanel.position.clone(),
+  };
+}
+
+function updateHandUiDrag(state, isPinching) {
+  if (handUiDrag?.state !== state) return;
+  if (!isPinching) {
+    handUiDrag = undefined;
+    return;
+  }
+  handPanelPoint.copy(state.points[8]).sub(handUiDrag.startPoint);
+  handUiPanel.position.copy(handUiDrag.startPosition).add(handPanelPoint);
+  handUiPanel.updateMatrixWorld(true);
+  syncHandDockPosition();
+}
+
+function syncHandDockPosition() {
+  if (!handDockPanel || !handUiPanel || handUiMode === "closed" || handUiMode === "dock") return;
+  handDockPanel.position.copy(handUiPanel.position);
+  handCameraUp.set(0, 1, 0).applyQuaternion(handUiPanel.quaternion);
+  handDockPanel.position.addScaledVector(
+    handCameraUp,
+    -(handUiHeight / 2 + 0.09 + 0.025),
+  );
+  handDockPanel.quaternion.copy(handUiPanel.quaternion);
+  handDockPanel.updateMatrixWorld(true);
 }
 
 function setHandUiMode(mode, anchorState = null) {
   const openingDock = mode === "dock" && handUiMode === "closed";
   handUiMode = mode;
+  stage.classList.toggle("is-browser-active", mode === "browser");
+  handUiDrag = undefined;
   updateHandUiPanelSize();
   handUiPanel.visible = mode !== "closed";
   handUiPanel.updateMatrixWorld(true);
@@ -1529,6 +1695,61 @@ function drawHandUi() {
   handUiTexture.needsUpdate = true;
 }
 
+function drawHandDockBar() {
+  if (!handDockContext || !handDockTexture) return;
+  const context = handDockContext;
+  context.clearRect(0, 0, handDockCanvas.width, handDockCanvas.height);
+  if (handUiMode !== "settings" && handUiMode !== "browser") {
+    handDockTexture.needsUpdate = true;
+    return;
+  }
+
+  context.fillStyle = "#11151def";
+  roundedRectPath(context, 12, 8, 776, 144, 44);
+  context.fill();
+  context.strokeStyle = "#dbe5ee75";
+  context.lineWidth = 2;
+  context.stroke();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillStyle = "#b9f3d4";
+  context.font = "600 19px sans-serif";
+  context.fillText("MVR", 84, 78);
+  drawDockBarButton(context, 265, "⚙", "Settings", handUiMode === "settings", "app-settings");
+  drawDockBarButton(
+    context,
+    385,
+    "◉",
+    "Passthrough",
+    passthroughEnabled,
+    "dock-passthrough",
+  );
+  drawDockBarButton(context, 505, "⌕", "Browser", handUiMode === "browser", "app-browser");
+  drawDockBarButton(context, 625, "×", "Close Menu", false, "app-close-menu");
+  const dragging = handStates.some((state) => state.touchTarget === "window-drag");
+  context.fillStyle = dragging ? "#b9f3d4" : "#ffffff50";
+  roundedRectPath(context, 352, 121, 96, 28, 12);
+  context.fill();
+  context.fillStyle = dragging ? "#19221e" : "#d1d5dd";
+  context.font = "600 11px sans-serif";
+  context.fillText("PINCH & DRAG", 400, 135);
+  handDockTexture.needsUpdate = true;
+}
+
+function drawDockBarButton(context, centerX, icon, label, selected, target) {
+  const hovered = handStates.some((state) => state.touchTarget === target);
+  context.fillStyle = selected ? "#b9f3d4" : hovered ? "#ffffff35" : "#ffffff12";
+  roundedRectPath(context, centerX - 50, 27, 100, 74, 18);
+  context.fill();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillStyle = selected ? "#19221e" : "#f4f3f0";
+  context.font = "24px sans-serif";
+  context.fillText(icon, centerX, 52);
+  context.font = label.length > 9 ? "10px sans-serif" : "11px sans-serif";
+  context.fillText(label, centerX, 82);
+}
+
 function drawHandDockApp(context, x, y, icon, label, selected, target, detail) {
   const hovered = handStates.some((state) => state.touchTarget === target);
   context.fillStyle = selected ? "#b9f3d4" : hovered ? "#e6ebf2" : "#ffffff14";
@@ -1552,60 +1773,85 @@ function drawHandDockApp(context, x, y, icon, label, selected, target, detail) {
 function drawBrowserApp(context) {
   context.textAlign = "left";
   context.fillStyle = "#aeb4c2";
-  context.font = "16px sans-serif";
-  context.fillText("SEARCH THE WEB", 42, 98);
+  context.font = "15px sans-serif";
+  context.fillText("WEB BROWSER", 42, 98);
 
   context.fillStyle = "#222733";
-  roundedRectPath(context, 34, 120, 732, 75, 20);
+  roundedRectPath(context, 34, 108, 732, 52, 15);
   context.fill();
-  context.fillStyle = handBrowserQuery ? "#f4f3f0" : "#aeb4c2";
+  context.fillStyle = "#ffffff1c";
+  roundedRectPath(context, 40, 114, 42, 40, 10);
+  context.fill();
+  roundedRectPath(context, 84, 114, 42, 40, 10);
+  context.fill();
+  context.textAlign = "center";
+  context.fillStyle = "#f4f3f0";
   context.font = "19px sans-serif";
-  const visibleQuery = handBrowserQuery || "Type a search with the keyboard";
+  context.fillText("‹", 61, 134);
+  context.fillText("›", 105, 134);
+  context.textAlign = "left";
+  context.fillStyle = handBrowserQuery || handBrowserUrl ? "#f4f3f0" : "#aeb4c2";
+  context.font = "15px sans-serif";
+  const visibleQuery = handBrowserQuery || handBrowserUrl || "Search or enter a URL";
   context.fillText(
-    visibleQuery.length > 42 ? `${visibleQuery.slice(0, 39)}...` : visibleQuery,
-    54,
-    158,
+    visibleQuery.length > 50 ? `${visibleQuery.slice(0, 47)}...` : visibleQuery,
+    138,
+    135,
   );
   context.fillStyle = "#b9f3d4";
-  roundedRectPath(context, 655, 130, 96, 54, 15);
+  roundedRectPath(context, 680, 114, 78, 40, 11);
   context.fill();
   context.textAlign = "center";
   context.fillStyle = "#19221e";
-  context.font = "600 15px sans-serif";
-  context.fillText("Search", 703, 157);
+  context.font = "600 13px sans-serif";
+  context.fillText("Go", 719, 134);
 
-  drawBrowserShortcut(context, 34, "Google", "Search the web", "G", "browser-google");
+  context.fillStyle = "#242936";
+  roundedRectPath(context, 34, 165, 732, 190, 12);
+  context.fill();
+  context.strokeStyle = "#ffffff55";
+  context.lineWidth = 1;
+  context.stroke();
+  if (stereoToggle.checked) {
+    context.textAlign = "center";
+    context.fillStyle = "#f4f3f0";
+    context.font = "14px sans-serif";
+    context.fillText("Webpage is shown at the center of headset view.", 400, 260);
+  }
+
+  drawBrowserShortcut(context, 34, "Google", "Search", "G", "browser-google");
   drawBrowserShortcut(context, 278, "YouTube", "Videos", "▶", "browser-youtube");
-  drawBrowserShortcut(context, 522, "Wikipedia", "Encyclopedia", "W", "browser-wikipedia");
+  drawBrowserShortcut(context, 522, "Wikipedia", "Read", "W", "browser-wikipedia");
 
-  drawBrowserKeyboardRow(context, "qwertyuiop", 80, 300, 56, 8);
-  drawBrowserKeyboardRow(context, "asdfghjkl", 112, 350, 56, 8);
-  drawBrowserKeyboardRow(context, "zxcvbnm", 168, 400, 56, 8);
-  drawBrowserSpecialKey(context, 650, 400, 110, 45, "⌫", "browser-backspace");
-  drawBrowserSpecialKey(context, 110, 450, 120, 54, "Clear", "browser-clear");
-  drawBrowserSpecialKey(context, 250, 450, 300, 54, "Space", "browser-space");
-  drawBrowserSpecialKey(context, 570, 450, 150, 54, "Go", "browser-open");
+  drawBrowserKeyboardRow(context, "qwertyuiop", 80, 425, 56, 8);
+  drawBrowserKeyboardRow(context, "asdfghjkl", 112, 464, 56, 8);
+  drawBrowserKeyboardRow(context, "zxcvbnm.-/", 80, 503, 56, 8);
+  drawBrowserKeyboardRow(context, "1234567890", 80, 542, 56, 8);
+  drawBrowserSpecialKey(context, 34, 581, 116, 42, "⌫", "browser-backspace");
+  drawBrowserSpecialKey(context, 160, 581, 105, 42, "Clear", "browser-clear");
+  drawBrowserSpecialKey(context, 275, 581, 270, 42, "Space", "browser-space");
+  drawBrowserSpecialKey(context, 555, 581, 211, 42, "Go / Search", "browser-open");
   context.textAlign = "center";
   context.fillStyle = "#87909e";
-  context.font = "12px sans-serif";
-  context.fillText("Google and shortcuts open in this browser tab. Use Back to return to the dock.", 400, 565);
+  context.font = "11px sans-serif";
+  context.fillText("Websites that block embedded browsing may not display here.", 400, 408);
 }
 
 function drawBrowserShortcut(context, x, title, detail, icon, target) {
   const hovered = handStates.some((state) => state.touchTarget === target);
   context.fillStyle = hovered ? "#35483f" : "#222733";
-  roundedRectPath(context, x, 205, 232, 58, 16);
+  roundedRectPath(context, x, 370, 232, 48, 14);
   context.fill();
   context.textAlign = "left";
   context.fillStyle = "#b9f3d4";
   context.font = "20px sans-serif";
-  context.fillText(icon, x + 14, 228);
+  context.fillText(icon, x + 14, 392);
   context.fillStyle = "#f4f3f0";
   context.font = "600 14px sans-serif";
-  context.fillText(title, x + 48, 222);
+  context.fillText(title, x + 48, 386);
   context.fillStyle = "#aeb4c2";
   context.font = "12px sans-serif";
-  context.fillText(detail, x + 48, 243);
+  context.fillText(detail, x + 48, 404);
 }
 
 function drawBrowserKeyboardRow(context, keys, x, y, keyWidth, gap) {
@@ -1614,12 +1860,12 @@ function drawBrowserKeyboardRow(context, keys, x, y, keyWidth, gap) {
     const target = `browser-key-${keys[index]}`;
     const hovered = handStates.some((state) => state.touchTarget === target);
     context.fillStyle = hovered ? "#35483f" : "#222733";
-    roundedRectPath(context, keyX, y, keyWidth, 45, 10);
+    roundedRectPath(context, keyX, y, keyWidth, 36, 10);
     context.fill();
     context.textAlign = "center";
     context.fillStyle = "#f4f3f0";
     context.font = "18px sans-serif";
-    context.fillText(keys[index].toUpperCase(), keyX + keyWidth / 2, y + 23);
+    context.fillText(keys[index].toUpperCase(), keyX + keyWidth / 2, y + 18);
   }
 }
 
@@ -1839,6 +2085,7 @@ function resizeRenderer() {
   if (!width || !height) return;
 
   renderer.setSize(width, height, false);
+  browserRenderer?.setSize(width, height);
   const aspect = stereoToggle.checked ? (width / 2) / height : width / height;
   camera.aspect = aspect;
   camera.updateProjectionMatrix();
@@ -1864,20 +2111,29 @@ function renderFrame() {
 
   updatePassthroughPlane();
   updateHandTracking();
+  if (browserObject) {
+    browserObject.visible = handUiMode === "browser";
+  }
 
   if (!stereoToggle.checked) {
+    const showBrowser = handUiMode === "browser" && Boolean(browserObject?.visible);
+    if (browserRenderer) browserRenderer.domElement.style.display = showBrowser ? "" : "none";
     renderer.setScissorTest(false);
     renderer.setViewport(0, 0, stage.clientWidth, stage.clientHeight);
     renderer.render(scene, camera);
+    if (showBrowser) browserRenderer?.render(scene, camera);
     return;
   }
 
+  const showBrowser = handUiMode === "browser" && Boolean(browserObject?.visible);
+  if (browserRenderer) browserRenderer.domElement.style.display = showBrowser ? "" : "none";
   const halfWidth = Math.floor(stage.clientWidth / 2);
   const fullHeight = stage.clientHeight;
   renderer.setScissorTest(true);
   renderEye(leftCamera, -0.032, 0, halfWidth, fullHeight);
   renderEye(rightCamera, 0.032, halfWidth, stage.clientWidth - halfWidth, fullHeight);
   renderer.setScissorTest(false);
+  if (showBrowser) browserRenderer?.render(scene, camera);
 }
 
 function renderEye(eyeCamera, eyeOffsetX, viewportX, viewportWidth, viewportHeight) {
