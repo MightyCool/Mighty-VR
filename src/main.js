@@ -423,30 +423,54 @@ async function startHandTracking() {
     return;
   }
 
+  let startupStep = "requesting camera access";
   handTrackingActive = true;
   handTrackingButton.disabled = true;
   handTrackingButton.textContent = "Starting…";
   handTrackingStatus.textContent = "Requesting rear-camera access. Allow the camera prompt to continue.";
 
   try {
-    handStream = await navigator.mediaDevices.getUserMedia({
+    const cameraConstraints = {
       audio: false,
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 640 },
-        height: { ideal: 480 },
+        width: { ideal: 480 },
+        height: { ideal: 360 },
       },
-    });
+    };
+    handStream = await navigator.mediaDevices.getUserMedia(cameraConstraints);
     if (!handTrackingActive) {
       stopCameraStream();
       return;
     }
 
-    const facingMode = handStream.getVideoTracks()[0]?.getSettings().facingMode;
+    let videoTrack = handStream.getVideoTracks()[0];
+    if (!videoTrack) throw new Error("The browser opened the camera without a video track.");
+    let facingMode;
+    if (typeof videoTrack.getSettings === "function") {
+      facingMode = videoTrack.getSettings().facingMode;
+    }
     if (facingMode === "user") {
-      throw new Error("The browser selected the selfie camera instead of the rear camera.");
+      for (const track of handStream.getTracks()) track.stop();
+      handStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { exact: "environment" },
+          width: { ideal: 480 },
+          height: { ideal: 360 },
+        },
+      });
+      videoTrack = handStream.getVideoTracks()[0];
+      facingMode =
+        videoTrack && typeof videoTrack.getSettings === "function"
+          ? videoTrack.getSettings().facingMode
+          : undefined;
+      if (!videoTrack || facingMode === "user") {
+        throw new Error("Safari could not select the rear camera.");
+      }
     }
 
+    startupStep = "starting the camera video";
     handTrackingStatus.textContent = "Loading the on-device hand tracker. The first start may take a moment.";
     handVideo = document.createElement("video");
     handVideo.autoplay = true;
@@ -458,12 +482,14 @@ async function startHandTracking() {
     document.body.append(handVideo);
     await handVideo.play();
 
+    startupStep = "loading the hand-tracking library";
     if (!HandLandmarkerClass) {
       const vision = await import("../node_modules/@mediapipe/tasks-vision/vision_bundle.mjs");
       HandLandmarkerClass = vision.HandLandmarker;
     }
 
     if (!handLandmarker) {
+      startupStep = "initializing the on-device hand model";
       const wasmFileset = {
         wasmLoaderPath: new URL("vision_wasm_nosimd_internal.js", HAND_WASM_BASE_URL).href,
         wasmBinaryPath: new URL("vision_wasm_nosimd_internal.wasm", HAND_WASM_BASE_URL).href,
@@ -492,21 +518,26 @@ async function startHandTracking() {
     resetHandOverlays();
     handTrackingButton.disabled = false;
     handTrackingButton.textContent = "Enable hand tracking";
-    handTrackingStatus.textContent = getHandTrackingErrorMessage(error);
+    handTrackingStatus.textContent = getHandTrackingErrorMessage(error, startupStep);
   }
 }
 
-function getHandTrackingErrorMessage(error) {
+function getHandTrackingErrorMessage(error, startupStep) {
   if (error.name === "NotAllowedError" || error.name === "SecurityError") {
-    return "Camera access was denied. Allow camera access in your browser settings, then try again.";
+    return "Safari did not grant camera access. Check Settings → Safari → Camera and this site's permission, then reload.";
   }
-  if (error.name === "NotFoundError" || error.message.includes("selfie camera")) {
-    return "No usable rear camera was found. Try a phone with a rear camera.";
+  if (error.name === "NotFoundError" || error.name === "OverconstrainedError") {
+    return "Safari could not find a usable rear camera. Check that no other app is using it, then reload and try again.";
   }
   if (error.name === "NotReadableError") {
     return "The camera is busy in another app. Close that app and try again.";
   }
-  return "Hand tracking could not start. Check camera access and reload the page to try again.";
+  if (error.name === "NotSupportedError" || error.name === "CompileError") {
+    return "This Safari version could not initialize the hand-tracking runtime. Reload the page and try again.";
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  const conciseDetail = detail.length > 140 ? `${detail.slice(0, 137)}…` : detail;
+  return `Hand tracking failed while ${startupStep}${error.name ? ` (${error.name})` : ""}: ${conciseDetail || "unknown error"}`;
 }
 
 function stopCameraStream() {
