@@ -668,6 +668,27 @@ input:focus-visible {
   background: #12151c;
 }
 
+.hand-tracking-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 9px 0 4px;
+  padding: 11px 14px;
+  border: 1px solid #30333e;
+  border-radius: 7px;
+  background: #12151c;
+}
+
+.hand-camera-source {
+  position: fixed;
+  z-index: -1;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .motion-copy {
   min-width: 0;
 }
@@ -994,6 +1015,11 @@ input:focus-visible {
     gap: 4px;
     padding: 9px 10px;
     font-size: 9px;
+  }
+
+  .hand-tracking-card {
+    gap: 8px;
+    padding: 10px;
   }
 }
 

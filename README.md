@@ -1,8 +1,8 @@
 # DIY VR — Step 1
 
-A cozy furnished 3D room that runs in your browser, with a bed, desk, sofa, reading chair, plants, and warm lamps. Move your phone to look around, drag with your finger or mouse, or switch on a side-by-side view for a two-lens headset. The scene is rendered on the phone, not the Windows computer. After Safari has loaded the page and the local 3D library, the open demo does not need a continuing PC connection or any internet access. To open or reload the website, the phone does need to be able to reach the computer's local server.
+A cozy furnished 3D room that runs in your browser, with a bed, desk, sofa, plants, and warm lamps. Move your phone to look around, drag with your finger or mouse, or switch on a side-by-side view for a two-lens headset. Optional hand tracking uses the phone's rear camera to show your hand in the room and pinch-operated controls. Hand tracking is processed on the device; camera video is not sent to a server. The scene is rendered on the phone, not the Windows computer. Once Safari has loaded the page, local 3D library, and optional hand-tracking model, the open demo does not need a continuing internet connection. To open or reload the website, or to load the hand-tracking files for the first time during local testing, the phone does need to reach the computer's local server.
 
-The app uses Three.js 0.160.1, downloaded once by npm and served from your own computer when testing locally. The GitHub Pages workflow bundles it for publishing. It does not use a paid service, an external 3D API, or a PC companion app.
+The app uses Three.js and MediaPipe Tasks Vision, downloaded once by npm and served from your own computer when testing locally. The hand landmark model and WebAssembly runtime are included in the published build and run locally in the browser. MediaPipe Tasks Vision is Apache-2.0 licensed; the hand model is provided by [MediaPipe](https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task). It does not use a paid service, an external 3D API, or a PC companion app.
 
 ## What you need
 
@@ -18,7 +18,7 @@ The iPhone 7 supports up to iOS 15.8.x. Apple requires a user gesture to request
 1. Open the `Mighty VR` folder in VS Code.
 2. Open **Terminal → New Terminal**.
 3. Check Node.js with `node --version`. If the command is not recognized, install the current LTS release from [nodejs.org](https://nodejs.org/) and restart VS Code.
-4. Download the one free app dependency by running this command once:
+4. Download the app dependencies by running this command once:
 
    ```powershell
    npm.cmd install
@@ -67,6 +67,8 @@ The included workflow at `.github/workflows/deploy.yml` builds the app with Vite
 
 Open the **published HTTPS GitHub Pages link** in Safari on your iPhone. Tap **Enter the demo**, try the scene, and enable **Headset view** to enter the full-screen two-eye view. Tap **Exit headset view** to get back to the controls. Because GitHub Pages uses HTTPS, tap **Enable motion** and allow Safari's permission prompt to test the phone sensors. For iPhone Safari's site settings, ensure **Motion & Orientation Access** is enabled if permission was allowed but no sensor readings appear.
 
+To try hand tracking, keep the phone's rear camera uncovered, tap **Enable hand tracking**, and allow camera access. Hold your hand in front of the rear camera. Pinch once to reveal the **MVR** button, move your index fingertip to it, and pinch again to open the in-scene settings. Point and pinch a setting to adjust it. Tap **Stop hand tracking** when finished. Camera access requires HTTPS (or localhost); the model runs locally and camera frames are not uploaded.
+
 Unlike the local Windows server, the published page stays available when your PC is turned off. GitHub Pages is for serving the website files; it does not add streaming, a Windows companion app, or SteamVR features.
 
 ### Test the production build on your PC first
@@ -95,7 +97,7 @@ If the page will not load, check that both devices are on the same Wi-Fi network
 
 ### Enable iPhone motion tracking (free local HTTPS setup)
 
-Safari restricts motion sensors to a secure HTTPS page. A plain `http://<computer-IP>:8080` address will show an explanation and keep touch controls available. To enable motion tracking on your home Wi-Fi, make a **locally trusted development certificate**. This setup keeps the certificate on your devices; it does not publish your site.
+Safari restricts motion sensors and camera access to a secure HTTPS page. A plain `http://<computer-IP>:8080` address will show an explanation and keep touch controls available. To enable motion tracking and rear-camera hand tracking on your home Wi-Fi, make a **locally trusted development certificate**. This setup keeps the certificate on your devices; it does not publish your site.
 
 1. Install the free `mkcert` tool. If Windows Package Manager (`winget`) is available, open a **second** PowerShell terminal and run:
 
@@ -148,6 +150,7 @@ mkcert installs a development root certificate on **your PC** and the separate r
 - **3D room:** The furnished room keeps its original floor and walls and adds a bed, desk and chair, sofa, reading chair, coffee table, plants, wall art, and warm lamps. Drag inside the scene to look around; arrow keys also work on a keyboard.
 - **Single-screen mode:** Leave **Headset view** turned off.
 - **Stereoscopic mode:** Turn **Headset view** on. The app switches to a full-screen room drawn as two adjacent half-width camera views; `LEFT EYE` and `RIGHT EYE` labels identify them. `Recenter` and `Exit headset view` remain available as floating controls. Place the phone screen horizontally in your two-lens headset and center the seam between the lenses. Adjust headset straps/spacing for comfort. Exit to return to one view and the settings.
+- **Hand tracking:** On HTTPS, allow camera access and verify that the rear camera tracks a hand in the room. Pinch to show MVR, then point to the logo and pinch to open the in-view settings. Try changing sensitivity or headset view and stop tracking to confirm the camera turns off.
 - **Motion tracking:** On iPhone Safari, open the trusted HTTPS address and tap **Enable motion** (this button supplies the required iOS permission gesture). Accept the permission prompt. The indicator should say **MOTION ON**, and α/β/γ should change as you rotate the phone. Use **Recenter your view** to set the current phone direction as forward.
 - **Permission denied / no sensor:** Deny permission or use HTTP on the local network. The app reports why phone motion is unavailable; dragging and arrow keys continue to work.
 - **Sensitivity:** Move **Look sensitivity** left/right and compare how far a drag or arrow-key press turns the view.

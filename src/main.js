@@ -18,6 +18,8 @@ const diagnosticMessage = document.querySelector("#diagnostic-message");
 const motionIndicator = document.querySelector("#motion-indicator");
 const sensitivitySlider = document.querySelector("#sensitivity");
 const sensitivityValue = document.querySelector("#sensitivity-value");
+const handTrackingButton = document.querySelector("#hand-tracking-button");
+const handTrackingStatus = document.querySelector("#hand-tracking-status");
 
 let renderer;
 let scene;
@@ -25,6 +27,24 @@ let camera;
 let leftCamera;
 let rightCamera;
 let animationFrame;
+let handLandmarker;
+let HandLandmarkerClass;
+let handStream;
+let handVideo;
+let handTrackingActive = false;
+let lastHandFrameTime = 0;
+let handWasPinching = false;
+let handRig;
+let handJoints = [];
+let handBones;
+let handCursor;
+let handLauncher;
+let handMenu;
+let handMenuCanvas;
+let handMenuContext;
+let handMenuTexture;
+let handMenuOpen = false;
+let handLauncherShown = false;
 let orientationAvailable = typeof window.DeviceOrientationEvent === "function";
 let orientationState = "off";
 let currentOrientation = null;
@@ -43,6 +63,19 @@ const screenTransform = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
 const cameraEuler = new THREE.Euler(0, 0, 0, "YXZ");
 const screenOrientationQuaternion = new THREE.Quaternion();
 const eyeOffset = new THREE.Vector3();
+const handWorldPoint = new THREE.Vector3();
+const handConnections = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16],
+  [13, 17], [17, 18], [18, 19], [19, 20], [0, 17],
+];
+const HAND_MODEL_URL = new URL("assets/hand_landmarker.task", document.baseURI).href;
+const HAND_WASM_BASE_URL = new URL(
+  "node_modules/@mediapipe/tasks-vision/wasm/",
+  document.baseURI,
+);
 const deviceOrientationHandler = (event) => {
   if (![event.alpha, event.beta, event.gamma].every(Number.isFinite)) return;
 
@@ -87,6 +120,7 @@ launchButton.addEventListener("click", () => {
 });
 
 homeButton.addEventListener("click", () => {
+  stopHandTracking();
   stopScene();
   demoScreen.hidden = true;
   homeScreen.hidden = false;
@@ -97,6 +131,9 @@ document.querySelector("#recenter-top").addEventListener("click", recenterView);
 document.querySelector("#stereo-recenter").addEventListener("click", recenterView);
 fullscreenButton.addEventListener("click", toggleFullscreen);
 document.addEventListener("fullscreenchange", updateFullscreenButton);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopHandTracking();
+});
 motionOrientation.addEventListener("change", refreshScreenOrientation);
 window.screen?.orientation?.addEventListener("change", refreshScreenOrientation);
 document.querySelector("#stereo-exit").addEventListener("click", () => {
@@ -123,6 +160,13 @@ sensitivitySlider.addEventListener("input", () => {
 });
 
 motionButton.addEventListener("click", enableMotion);
+handTrackingButton.addEventListener("click", () => {
+  if (handTrackingActive) {
+    stopHandTracking();
+  } else {
+    startHandTracking();
+  }
+});
 stage.addEventListener("pointerdown", onPointerDown);
 stage.addEventListener("pointermove", onPointerMove);
 stage.addEventListener("pointerup", onPointerUp);
@@ -273,6 +317,7 @@ function startScene() {
 }
 
 function stopScene() {
+  stopHandTracking();
   if (animationFrame) {
     cancelAnimationFrame(animationFrame);
     animationFrame = undefined;
@@ -300,7 +345,361 @@ function createScene() {
 
   buildRoom();
   buildDecor();
+  buildHandOverlay();
   renderer.setAnimationLoop(null);
+}
+
+function buildHandOverlay() {
+  handRig = new THREE.Group();
+  const boneGeometry = new THREE.BufferGeometry();
+  boneGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(handConnections.length * 6), 3));
+  const boneMaterial = new THREE.LineBasicMaterial({ color: 0xb9f3d4, linewidth: 2, depthTest: false });
+  handBones = new THREE.LineSegments(boneGeometry, boneMaterial);
+  handRig.add(handBones);
+  handRig.renderOrder = 9;
+
+  const jointGeometry = new THREE.SphereGeometry(0.018, 8, 6);
+  const jointMaterial = new THREE.MeshBasicMaterial({ color: 0xe7fff1, depthTest: false });
+  handJoints = Array.from({ length: 21 }, () => {
+    const joint = new THREE.Mesh(jointGeometry, jointMaterial);
+    handRig.add(joint);
+    return joint;
+  });
+  handRig.visible = false;
+  scene.add(handRig);
+
+  handCursor = new THREE.Mesh(
+    new THREE.SphereGeometry(0.035, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffd17c }),
+  );
+  handCursor.visible = false;
+  handCursor.renderOrder = 12;
+  scene.add(handCursor);
+
+  const launcherCanvas = document.createElement("canvas");
+  launcherCanvas.width = 320;
+  launcherCanvas.height = 150;
+  const launcherContext = launcherCanvas.getContext("2d");
+  launcherContext.fillStyle = "#171a22ee";
+  launcherContext.beginPath();
+  launcherContext.roundRect(4, 4, 312, 142, 28);
+  launcherContext.fill();
+  launcherContext.strokeStyle = "#b9f3d4";
+  launcherContext.lineWidth = 5;
+  launcherContext.stroke();
+  launcherContext.fillStyle = "#b9f3d4";
+  launcherContext.font = "600 62px sans-serif";
+  launcherContext.textAlign = "center";
+  launcherContext.textBaseline = "middle";
+  launcherContext.fillText("◉ MVR", 160, 75);
+  const launcherTexture = new THREE.CanvasTexture(launcherCanvas);
+  handLauncher = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.54, 0.26),
+    new THREE.MeshBasicMaterial({ map: launcherTexture, transparent: true, depthTest: false }),
+  );
+  handLauncher.visible = false;
+  handLauncher.renderOrder = 10;
+  scene.add(handLauncher);
+
+  handMenuCanvas = document.createElement("canvas");
+  handMenuCanvas.width = 512;
+  handMenuCanvas.height = 640;
+  handMenuContext = handMenuCanvas.getContext("2d");
+  handMenuTexture = new THREE.CanvasTexture(handMenuCanvas);
+  handMenu = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.82, 1.02),
+    new THREE.MeshBasicMaterial({ map: handMenuTexture, transparent: true, depthTest: false }),
+  );
+  handMenu.visible = false;
+  handMenu.renderOrder = 11;
+  scene.add(handMenu);
+  drawHandMenu();
+}
+
+async function startHandTracking() {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    handTrackingStatus.textContent = "Camera hand tracking needs HTTPS (or localhost) and a browser with camera support.";
+    return;
+  }
+
+  handTrackingActive = true;
+  handTrackingButton.disabled = true;
+  handTrackingButton.textContent = "Starting…";
+  handTrackingStatus.textContent = "Requesting rear-camera access. Allow the camera prompt to continue.";
+
+  try {
+    handStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+      },
+    });
+    if (!handTrackingActive) {
+      stopCameraStream();
+      return;
+    }
+
+    const facingMode = handStream.getVideoTracks()[0]?.getSettings().facingMode;
+    if (facingMode === "user") {
+      throw new Error("The browser selected the selfie camera instead of the rear camera.");
+    }
+
+    handTrackingStatus.textContent = "Loading the on-device hand tracker. The first start may take a moment.";
+    handVideo = document.createElement("video");
+    handVideo.autoplay = true;
+    handVideo.muted = true;
+    handVideo.playsInline = true;
+    handVideo.setAttribute("aria-hidden", "true");
+    handVideo.className = "hand-camera-source";
+    handVideo.srcObject = handStream;
+    document.body.append(handVideo);
+    await handVideo.play();
+
+    if (!HandLandmarkerClass) {
+      const vision = await import("../node_modules/@mediapipe/tasks-vision/vision_bundle.mjs");
+      HandLandmarkerClass = vision.HandLandmarker;
+    }
+
+    if (!handLandmarker) {
+      const wasmFileset = {
+        wasmLoaderPath: new URL("vision_wasm_nosimd_internal.js", HAND_WASM_BASE_URL).href,
+        wasmBinaryPath: new URL("vision_wasm_nosimd_internal.wasm", HAND_WASM_BASE_URL).href,
+      };
+      handLandmarker = await HandLandmarkerClass.createFromOptions(wasmFileset, {
+        baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "CPU" },
+        runningMode: "VIDEO",
+        numHands: 1,
+        minHandDetectionConfidence: 0.55,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+    }
+
+    if (!handTrackingActive) {
+      stopCameraStream();
+      return;
+    }
+    handTrackingButton.disabled = false;
+    handTrackingButton.textContent = "Stop hand tracking";
+    handTrackingStatus.textContent = "Rear camera active. Show your hand, then pinch to bring up the MVR button.";
+  } catch (error) {
+    console.error("Unable to start hand tracking:", error);
+    stopCameraStream();
+    handTrackingActive = false;
+    resetHandOverlays();
+    handTrackingButton.disabled = false;
+    handTrackingButton.textContent = "Enable hand tracking";
+    handTrackingStatus.textContent = getHandTrackingErrorMessage(error);
+  }
+}
+
+function getHandTrackingErrorMessage(error) {
+  if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+    return "Camera access was denied. Allow camera access in your browser settings, then try again.";
+  }
+  if (error.name === "NotFoundError" || error.message.includes("selfie camera")) {
+    return "No usable rear camera was found. Try a phone with a rear camera.";
+  }
+  if (error.name === "NotReadableError") {
+    return "The camera is busy in another app. Close that app and try again.";
+  }
+  return "Hand tracking could not start. Check camera access and reload the page to try again.";
+}
+
+function stopCameraStream() {
+  for (const track of handStream?.getTracks() || []) track.stop();
+  handStream = undefined;
+  if (handVideo) {
+    handVideo.srcObject = null;
+    handVideo.remove();
+    handVideo = undefined;
+  }
+}
+
+function stopHandTracking() {
+  handTrackingActive = false;
+  stopCameraStream();
+  resetHandOverlays();
+  handTrackingButton.disabled = false;
+  handTrackingButton.textContent = "Enable hand tracking";
+  if (handTrackingStatus) {
+    handTrackingStatus.textContent =
+      "Use your rear camera to see your hand in the room. Camera frames stay on this device.";
+  }
+}
+
+function resetHandOverlays() {
+  handRig && (handRig.visible = false);
+  handCursor && (handCursor.visible = false);
+  handLauncher && (handLauncher.visible = false);
+  handMenu && (handMenu.visible = false);
+  handLauncherShown = false;
+  handMenuOpen = false;
+  handWasPinching = false;
+}
+
+function updateHandTracking() {
+  if (!handTrackingActive || !handLandmarker || !handVideo || handVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+    return;
+  }
+  const now = performance.now();
+  if (now - lastHandFrameTime < 90) return;
+  lastHandFrameTime = now;
+
+  try {
+    const result = handLandmarker.detectForVideo(handVideo, now);
+    const landmarks = result.landmarks[0];
+    if (!landmarks) {
+      handRig.visible = false;
+      handCursor.visible = false;
+      handWasPinching = false;
+      handTrackingStatus.textContent = "Looking for a hand. Move it into the rear camera view.";
+      return;
+    }
+
+    handRig.visible = true;
+    handCursor.visible = true;
+    handTrackingStatus.textContent = "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.";
+    updateHandPose(landmarks);
+
+    const palmSize = Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
+    const pinchDistance = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y);
+    const isPinching = palmSize > 0 && pinchDistance / palmSize < 0.34;
+    if (isPinching && !handWasPinching) handleHandPinch(landmarks[8].x, landmarks[8].y);
+    handWasPinching = isPinching;
+    handCursor.scale.setScalar(isPinching ? 1.5 : 1);
+  } catch (error) {
+    console.error("Hand tracking frame failed:", error);
+    handTrackingActive = false;
+    stopCameraStream();
+    resetHandOverlays();
+    handTrackingButton.textContent = "Enable hand tracking";
+    handTrackingStatus.textContent = "Hand tracking paused after an error. Stop it and enable it again.";
+  }
+}
+
+function screenPointToWorld(x, y, depth, zOffset = 0) {
+  const viewHeight = 2 * depth * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const viewWidth = viewHeight * camera.aspect;
+  handWorldPoint.set((x - 0.5) * viewWidth, (0.5 - y) * viewHeight, -depth + zOffset);
+  return handWorldPoint.applyQuaternion(camera.quaternion).add(camera.position);
+}
+
+function updateHandPose(landmarks) {
+  const positions = handBones.geometry.attributes.position;
+  const points = landmarks.map((landmark) =>
+    screenPointToWorld(landmark.x, landmark.y, 1.2, landmark.z * 0.35).clone(),
+  );
+  for (let i = 0; i < handJoints.length; i += 1) {
+    handJoints[i].position.copy(points[i]);
+  }
+  let offset = 0;
+  for (const [start, end] of handConnections) {
+    positions.setXYZ(offset++, points[start].x, points[start].y, points[start].z);
+    positions.setXYZ(offset++, points[end].x, points[end].y, points[end].z);
+  }
+  positions.needsUpdate = true;
+  handBones.geometry.computeBoundingSphere();
+  handCursor.position.copy(points[8]);
+
+  if (handLauncherShown) {
+    handLauncher.visible = !handMenuOpen;
+    handLauncher.position.copy(screenPointToWorld(0.79, 0.2, 1.15));
+    handLauncher.quaternion.copy(camera.quaternion);
+  }
+  if (handMenuOpen) {
+    handMenu.visible = true;
+    handMenu.position.copy(screenPointToWorld(0.5, 0.51, 1.25));
+    handMenu.quaternion.copy(camera.quaternion);
+  }
+}
+
+function handleHandPinch(x, y) {
+  if (!handLauncherShown) {
+    handLauncherShown = true;
+    handLauncher.visible = true;
+    return;
+  }
+
+  if (!handMenuOpen) {
+    if (x >= 0.66 && x <= 0.92 && y >= 0.12 && y <= 0.28) {
+      handMenuOpen = true;
+      handLauncher.visible = false;
+      handMenu.visible = true;
+    }
+    return;
+  }
+
+  const panelWidth = 0.46;
+  const panelHeight = 0.64;
+  const left = 0.5 - panelWidth / 2;
+  const top = 0.51 - panelHeight / 2;
+  if (x < left || x > left + panelWidth || y < top || y > top + panelHeight) return;
+  const canvasX = ((x - left) / panelWidth) * handMenuCanvas.width;
+  const canvasY = ((y - top) / panelHeight) * handMenuCanvas.height;
+  if (canvasY < 88) {
+    handMenuOpen = false;
+    handMenu.visible = false;
+    handLauncher.visible = true;
+  } else if (canvasY < 225) {
+    const amount = canvasX < handMenuCanvas.width / 2 ? -0.1 : 0.1;
+    sensitivitySlider.value = String(THREE.MathUtils.clamp(sensitivity + amount, 0.4, 2));
+    sensitivitySlider.dispatchEvent(new Event("input", { bubbles: true }));
+  } else if (canvasY < 345) {
+    const nextMode = { auto: "portrait", portrait: "landscape", landscape: "auto" }[motionOrientation.value];
+    motionOrientation.value = nextMode;
+    motionOrientation.dispatchEvent(new Event("change", { bubbles: true }));
+  } else if (canvasY < 465) {
+    stereoToggle.checked = !stereoToggle.checked;
+    stereoToggle.dispatchEvent(new Event("change", { bubbles: true }));
+  } else {
+    recenterView();
+  }
+  drawHandMenu();
+}
+
+function drawHandMenu() {
+  if (!handMenuContext) return;
+  const context = handMenuContext;
+  context.clearRect(0, 0, handMenuCanvas.width, handMenuCanvas.height);
+  context.fillStyle = "#151822f2";
+  context.beginPath();
+  context.roundRect(8, 8, 496, 624, 32);
+  context.fill();
+  context.strokeStyle = "#b9f3d4";
+  context.lineWidth = 5;
+  context.stroke();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillStyle = "#b9f3d4";
+  context.font = "600 38px sans-serif";
+  context.fillText("MVR  ·  ROOM SETTINGS", 256, 58);
+  context.font = "22px sans-serif";
+  drawHandMenuButton(context, 34, 112, 444, 106, `Sensitivity    −   ${sensitivity.toFixed(1)}×   +`);
+  drawHandMenuButton(context, 34, 236, 444, 94, `Orientation    ${motionOrientation.value}`);
+  drawHandMenuButton(context, 34, 348, 444, 94, `Headset view    ${stereoToggle.checked ? "ON" : "OFF"}`);
+  drawHandMenuButton(context, 34, 460, 444, 94, "Recenter view");
+  context.fillStyle = "#b8b9c4";
+  context.font = "18px sans-serif";
+  context.fillText("Pinch a control · Pinch here to close", 256, 594);
+  handMenuTexture.needsUpdate = true;
+}
+
+function drawHandMenuButton(context, x, y, width, height, label) {
+  context.fillStyle = "#292d39";
+  context.beginPath();
+  context.roundRect(x, y, width, height, 18);
+  context.fill();
+  context.strokeStyle = "#ffffff30";
+  context.lineWidth = 2;
+  context.stroke();
+  context.fillStyle = "#f4f3f0";
+  context.font = "24px sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(label, x + width / 2, y + height / 2, width - 20);
 }
 
 function buildRoom() {
@@ -443,9 +842,6 @@ function buildDecor() {
   for (const x of [-0.77, 0.15, 1.07]) {
     addSoftCushion([x, 0.71, -2.96], [0.43, 0.14, 0.35], 0x898e85);
   }
-  addSoftCushion([-0.84, 0.98, -2.04], [0.48, 0.26, 0.14], 0xc58e82);
-  addSoftCushion([0.15, 0.98, -2.04], [0.48, 0.26, 0.14], 0x899186);
-  addSoftCushion([1.14, 0.98, -2.04], [0.48, 0.26, 0.14], 0xd2b78e);
   for (const x of [-1.12, 1.42]) {
     for (const z of [-3.03, -2.41]) addBox([x, 0.16, z], [0.12, 0.32, 0.12], 0x574737);
   }
@@ -458,15 +854,6 @@ function buildDecor() {
   addBox([-0.36, 0.65, -1.55], [0.42, 0.035, 0.31], 0xd8b793);
   addCylinder([0.42, 0.7, -1.61], 0.1, 0.18, 0xe7d6bd);
 
-  addBox([4.12, 0.42, -2.25], [1.25, 0.36, 1.18], 0x9a7061, -0.2);
-  addBox([4.12, 0.95, -1.79], [1.25, 1.02, 0.3], 0x9a7061, -0.2);
-  addSoftCushion([4.12, 0.68, -2.25], [0.52, 0.17, 0.5], 0xb38573);
-  addSoftCushion([4.12, 1, -1.94], [0.48, 0.4, 0.16], 0xb38573);
-  addBox([3.46, 0.68, -2.25], [0.18, 0.58, 1.14], 0x9a7061, -0.2);
-  addBox([4.78, 0.68, -2.25], [0.18, 0.58, 1.14], 0x9a7061, -0.2);
-  addCylinder([4.12, 0.24, -3.3], 0.48, 0.12, 0x9a7050);
-  addCylinder([4.12, 0.13, -3.3], 0.08, 0.22, 0x684b38);
-
   addBox([-4.25, 2.32, -4.91], [1.6, 1.15, 0.1], 0xd9c5a4);
   addBox([-4.25, 2.32, -4.84], [1.42, 0.97, 0.04], 0x829083);
   addBox([-4.25, 2.21, -4.81], [0.06, 0.62, 0.025], 0xd7b994);
@@ -475,7 +862,6 @@ function buildDecor() {
   buildFloorLamp(-2.45, -1.8);
   buildPlant(-5.15, 0.38, 1.1);
   buildPlant(5.12, -3.85, 0.9);
-  buildPlant(1.75, 0.25, 0.75);
 }
 
 function resizeRenderer() {
@@ -506,6 +892,8 @@ function renderFrame() {
     cameraEuler.set(manualPitch, manualYaw, 0, "YXZ");
     camera.quaternion.setFromEuler(cameraEuler);
   }
+
+  updateHandTracking();
 
   if (!stereoToggle.checked) {
     renderer.setScissorTest(false);

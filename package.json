@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.1.0",
     "three": "0.160.1"
   },
   "devDependencies": {

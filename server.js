@@ -12,15 +12,21 @@ const publicFiles = new Set([
   "index.html",
   "styles.css",
   "src/main.js",
+  "assets/hand_landmarker.task",
   "node_modules/three/build/three.module.js",
+  "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs",
+  "node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_nosimd_internal.js",
+  "node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_nosimd_internal.wasm",
 ]);
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".ico": "image/x-icon",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".wasm": "application/wasm",
 };
 
 async function serveFile(request, response) {
