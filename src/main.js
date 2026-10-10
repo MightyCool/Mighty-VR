@@ -305,7 +305,9 @@ function startScene() {
     } catch (error) {
       console.error("Unable to create the 3D scene:", error);
       sceneMessage.hidden = false;
-      sceneMessage.textContent = "This browser could not start the 3D scene. Try updating Safari or using a recent desktop browser.";
+      sceneMessage.textContent =
+        `This browser could not start the 3D scene: ${error instanceof Error ? error.message : String(error)}. ` +
+        "Try reloading the page or using a browser with WebGL support.";
       return;
     }
   }
@@ -381,8 +383,7 @@ function buildHandOverlay() {
   launcherCanvas.height = 150;
   const launcherContext = launcherCanvas.getContext("2d");
   launcherContext.fillStyle = "#171a22ee";
-  launcherContext.beginPath();
-  launcherContext.roundRect(4, 4, 312, 142, 28);
+  roundedRectPath(launcherContext, 4, 4, 312, 142, 28);
   launcherContext.fill();
   launcherContext.strokeStyle = "#b9f3d4";
   launcherContext.lineWidth = 5;
@@ -665,8 +666,7 @@ function drawHandMenu() {
   const context = handMenuContext;
   context.clearRect(0, 0, handMenuCanvas.width, handMenuCanvas.height);
   context.fillStyle = "#151822f2";
-  context.beginPath();
-  context.roundRect(8, 8, 496, 624, 32);
+  roundedRectPath(context, 8, 8, 496, 624, 32);
   context.fill();
   context.strokeStyle = "#b9f3d4";
   context.lineWidth = 5;
@@ -689,8 +689,7 @@ function drawHandMenu() {
 
 function drawHandMenuButton(context, x, y, width, height, label) {
   context.fillStyle = "#292d39";
-  context.beginPath();
-  context.roundRect(x, y, width, height, 18);
+  roundedRectPath(context, x, y, width, height, 18);
   context.fill();
   context.strokeStyle = "#ffffff30";
   context.lineWidth = 2;
@@ -700,6 +699,21 @@ function drawHandMenuButton(context, x, y, width, height, label) {
   context.textAlign = "center";
   context.textBaseline = "middle";
   context.fillText(label, x + width / 2, y + height / 2, width - 20);
+}
+
+function roundedRectPath(context, x, y, width, height, radius) {
+  const corner = Math.min(radius, width / 2, height / 2);
+  context.beginPath();
+  context.moveTo(x + corner, y);
+  context.lineTo(x + width - corner, y);
+  context.arcTo(x + width, y, x + width, y + corner, corner);
+  context.lineTo(x + width, y + height - corner);
+  context.arcTo(x + width, y + height, x + width - corner, y + height, corner);
+  context.lineTo(x + corner, y + height);
+  context.arcTo(x, y + height, x, y + height - corner, corner);
+  context.lineTo(x, y + corner);
+  context.arcTo(x, y, x + corner, y, corner);
+  context.closePath();
 }
 
 function buildRoom() {

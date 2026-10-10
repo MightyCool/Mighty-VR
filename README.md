@@ -7,11 +7,13 @@ The app uses Three.js and MediaPipe Tasks Vision, downloaded once by npm and ser
 ## What you need
 
 - Windows 10 or 11 with [Node.js](https://nodejs.org/) installed.
-- A current desktop browser, or Safari on an iPhone 7.
+- A current browser on Windows 11, or Safari on an iPhone 7 running iOS 15.8.x.
 - Your computer and iPhone on the same Wi-Fi for local testing.
 - For iPhone motion tracking, a free locally trusted HTTPS certificate. See **Enable iPhone motion tracking** below.
 
 The iPhone 7 supports up to iOS 15.8.x. Apple requires a user gesture to request motion permission in supported Safari versions, and motion access requires a secure (HTTPS) page. On desktop or on an unsecured local-network address, you can still explore using drag/touch and desktop arrow keys.
+
+The browser interface is kept compatible with iOS 15 Safari; newer optional browser APIs are not required to build or open the room.
 
 ## Run on Windows
 
