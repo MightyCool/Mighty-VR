@@ -517,27 +517,20 @@ async function startHandTracking() {
 
     startupStep = "loading the hand-tracking library";
     startupStep = "initializing the on-device hand model";
-    if (typeof Worker === "function" && typeof createImageBitmap === "function") {
-      await startHandWorker();
+    if (canUseHandTrackingWorker()) {
+      try {
+        await startHandWorker();
+      } catch (error) {
+        console.warn("Hand-tracking worker is unavailable; using the compatible local tracker:", error);
+        handWorker?.terminate();
+        handWorker = undefined;
+        handWorkerReady = false;
+        handDetectionPending = false;
+        handTrackingStatus.textContent = "Preparing the compatible on-device hand tracker.";
+        await initializeHandTrackerOnMainThread();
+      }
     } else {
-      if (!HandLandmarkerClass) {
-        const vision = await import("../node_modules/@mediapipe/tasks-vision/vision_bundle.mjs");
-        HandLandmarkerClass = vision.HandLandmarker;
-      }
-      if (!handLandmarker) {
-        const wasmFileset = {
-          wasmLoaderPath: new URL("vision_wasm_nosimd_internal.js", HAND_WASM_BASE_URL).href,
-          wasmBinaryPath: new URL("vision_wasm_nosimd_internal.wasm", HAND_WASM_BASE_URL).href,
-        };
-        handLandmarker = await HandLandmarkerClass.createFromOptions(wasmFileset, {
-          baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "CPU" },
-          runningMode: "VIDEO",
-          numHands: 1,
-          minHandDetectionConfidence: 0.55,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
-      }
+      await initializeHandTrackerOnMainThread();
     }
 
     if (!handTrackingActive) {
@@ -556,6 +549,34 @@ async function startHandTracking() {
     handTrackingButton.textContent = "Enable hand tracking";
     handTrackingStatus.textContent = getHandTrackingErrorMessage(error, startupStep);
   }
+}
+
+function canUseHandTrackingWorker() {
+  const isIOS =
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  return !isIOS && typeof Worker === "function" && typeof createImageBitmap === "function";
+}
+
+async function initializeHandTrackerOnMainThread() {
+  if (!HandLandmarkerClass) {
+    const vision = await import("../node_modules/@mediapipe/tasks-vision/vision_bundle.mjs");
+    HandLandmarkerClass = vision.HandLandmarker;
+  }
+  if (handLandmarker) return;
+
+  const wasmFileset = {
+    wasmLoaderPath: new URL("vision_wasm_nosimd_internal.js", HAND_WASM_BASE_URL).href,
+    wasmBinaryPath: new URL("vision_wasm_nosimd_internal.wasm", HAND_WASM_BASE_URL).href,
+  };
+  handLandmarker = await HandLandmarkerClass.createFromOptions(wasmFileset, {
+    baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "CPU" },
+    runningMode: "VIDEO",
+    numHands: 1,
+    minHandDetectionConfidence: 0.55,
+    minHandPresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
 }
 
 function startHandWorker() {
