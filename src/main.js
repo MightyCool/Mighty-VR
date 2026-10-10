@@ -20,6 +20,7 @@ const sensitivitySlider = document.querySelector("#sensitivity");
 const sensitivityValue = document.querySelector("#sensitivity-value");
 const handTrackingButton = document.querySelector("#hand-tracking-button");
 const handTrackingStatus = document.querySelector("#hand-tracking-status");
+const handTrackingPerformance = document.querySelector("#hand-tracking-performance");
 
 let renderer;
 let scene;
@@ -41,7 +42,13 @@ let lastHandVideoTime = -1;
 let handFrameIntervalMs = 100;
 let handInferenceMs = 0;
 let handInputWidth = 320;
+let handProfileWindowStart = 0;
+let handProfileResultCount = 0;
+let handProfileDroppedFrames = 0;
+let handFlightVideoTime = 0;
+let handCameraFrameRate = 30;
 let handWasPinching = false;
+let handPoseInitialized = false;
 let handRig;
 let handJoints;
 let handCursor;
@@ -76,12 +83,28 @@ const cameraEuler = new THREE.Euler(0, 0, 0, "YXZ");
 const screenOrientationQuaternion = new THREE.Quaternion();
 const eyeOffset = new THREE.Vector3();
 const handWorldPoint = new THREE.Vector3();
+const handCameraRight = new THREE.Vector3();
+const handCameraUp = new THREE.Vector3();
+const handCameraBack = new THREE.Vector3();
+const handCameraViewScale = 2 * Math.tan(THREE.MathUtils.degToRad(76 / 2));
 const handPoints = Array.from({ length: 21 }, () => new THREE.Vector3());
+const handLandmarkBuffer = Array.from({ length: 21 }, () => ({ x: 0, y: 0, z: 0 }));
+const previousHandLandmarks = new Float32Array(21 * 3);
+const previousHandCameraQuaternion = new THREE.Quaternion();
 const handSegmentDirection = new THREE.Vector3();
 const handInstanceScale = new THREE.Vector3();
 const handInstanceMatrix = new THREE.Matrix4();
 const handSegmentQuaternion = new THREE.Quaternion();
 const handIdentityQuaternion = new THREE.Quaternion();
+const supportsWasmSimd = (() => {
+  if (typeof WebAssembly === "undefined") return false;
+  const simdTest = new Uint8Array([
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123,
+    3, 2, 1, 0, 10, 8, 1, 6, 0, 65, 0, 253, 17, 11,
+  ]);
+  return WebAssembly.validate(simdTest);
+})();
+const HAND_WASM_RUNTIME = supportsWasmSimd ? "vision_wasm_internal" : "vision_wasm_nosimd_internal";
 const handConnections = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -470,6 +493,7 @@ async function startHandTracking() {
         facingMode: { ideal: "environment" },
         width: { ideal: 320 },
         height: { ideal: 240 },
+        frameRate: { ideal: 30, max: 30 },
       },
     };
     handStream = await navigator.mediaDevices.getUserMedia(cameraConstraints);
@@ -480,6 +504,8 @@ async function startHandTracking() {
 
     let videoTrack = handStream.getVideoTracks()[0];
     if (!videoTrack) throw new Error("The browser opened the camera without a video track.");
+    const cameraSettings = typeof videoTrack.getSettings === "function" ? videoTrack.getSettings() : undefined;
+    handCameraFrameRate = cameraSettings?.frameRate || 30;
     let facingMode;
     if (typeof videoTrack.getSettings === "function") {
       facingMode = videoTrack.getSettings().facingMode;
@@ -492,6 +518,7 @@ async function startHandTracking() {
           facingMode: { exact: "environment" },
           width: { ideal: 320 },
           height: { ideal: 240 },
+          frameRate: { ideal: 30, max: 30 },
         },
       });
       videoTrack = handStream.getVideoTracks()[0];
@@ -503,6 +530,10 @@ async function startHandTracking() {
         throw new Error("Safari could not select the rear camera.");
       }
     }
+    handCameraFrameRate =
+      typeof videoTrack.getSettings === "function" && videoTrack.getSettings().frameRate
+        ? videoTrack.getSettings().frameRate
+        : handCameraFrameRate;
 
     startupStep = "starting the camera video";
     handTrackingStatus.textContent = "Loading the on-device hand tracker. The first start may take a moment.";
@@ -569,8 +600,8 @@ async function initializeHandTrackerOnMainThread() {
   if (handLandmarker) return;
 
   const wasmFileset = {
-    wasmLoaderPath: new URL("vision_wasm_nosimd_internal.js", HAND_WASM_BASE_URL).href,
-    wasmBinaryPath: new URL("vision_wasm_nosimd_internal.wasm", HAND_WASM_BASE_URL).href,
+    wasmLoaderPath: new URL(`${HAND_WASM_RUNTIME}.js`, HAND_WASM_BASE_URL).href,
+    wasmBinaryPath: new URL(`${HAND_WASM_RUNTIME}.wasm`, HAND_WASM_BASE_URL).href,
   };
   handLandmarker = await HandLandmarkerClass.createFromOptions(wasmFileset, {
     baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "CPU" },
@@ -601,7 +632,9 @@ function startHandWorker() {
       } else if (data.type === "result") {
         handDetectionPending = false;
         updateHandFrameInterval(Math.max(data.inferenceMs, performance.now() - data.timestamp), true);
+        recordHandTrackingResult();
         processHandLandmarks(data.landmarks, data.timestamp);
+        updateHandTracking();
       }
     };
     worker.onerror = (event) => {
@@ -612,6 +645,7 @@ function startHandWorker() {
     worker.postMessage({
       type: "initialize",
       modelUrl: HAND_MODEL_URL,
+      wasmRuntime: HAND_WASM_RUNTIME,
       visionBundleUrl: new URL(
         "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs",
         document.baseURI,
@@ -644,13 +678,35 @@ function updateHandFrameInterval(inferenceMs, useWorker) {
   if (!Number.isFinite(inferenceMs) || inferenceMs < 0) return;
   handInferenceMs = handInferenceMs === 0 ? inferenceMs : handInferenceMs * 0.75 + inferenceMs * 0.25;
   if (useWorker) {
-    if (handInferenceMs > 120) handInputWidth = 256;
-    else if (handInferenceMs < 85) handInputWidth = 320;
+    if (handInferenceMs > 80) handInputWidth = 192;
+    else if (handInferenceMs > 45) handInputWidth = 256;
+    else if (handInferenceMs < 32) handInputWidth = 320;
   }
-  const minimumInterval = useWorker ? 17 : 100;
-  const maximumInterval = useWorker ? 250 : 500;
-  const headroom = useWorker ? 1.5 : 2;
+  const minimumInterval = 1000 / 30;
+  const maximumInterval = 500;
+  const headroom = useWorker ? 1 : 1.1;
   handFrameIntervalMs = Math.min(maximumInterval, Math.max(minimumInterval, Math.ceil(handInferenceMs * headroom)));
+}
+
+function recordHandTrackingResult() {
+  const now = performance.now();
+  if (!handProfileWindowStart) handProfileWindowStart = now;
+  handProfileResultCount += 1;
+  if (handVideo && handFlightVideoTime > 0) {
+    const elapsedSeconds = Math.max(0, handVideo.currentTime - handFlightVideoTime);
+    handProfileDroppedFrames += Math.max(0, Math.round(elapsedSeconds * handCameraFrameRate) - 1);
+  }
+
+  const windowDuration = now - handProfileWindowStart;
+  if (windowDuration < 1000) return;
+  const trackingFps = (handProfileResultCount * 1000) / windowDuration;
+  handTrackingPerformance.textContent =
+    `${trackingFps.toFixed(0)} tracking FPS · ${handInferenceMs.toFixed(0)} ms inference · ` +
+    `${handProfileDroppedFrames} skipped camera frames`;
+  handTrackingPerformance.hidden = false;
+  handProfileWindowStart = now;
+  handProfileResultCount = 0;
+  handProfileDroppedFrames = 0;
 }
 
 async function playHandVideo() {
@@ -742,6 +798,12 @@ function stopCameraStream() {
   handFrameIntervalMs = 100;
   handInferenceMs = 0;
   handInputWidth = 320;
+  handProfileWindowStart = 0;
+  handProfileResultCount = 0;
+  handProfileDroppedFrames = 0;
+  handTrackingPerformance.hidden = true;
+  handTrackingPerformance.textContent = "";
+  handPoseInitialized = false;
   lastHandVideoTime = -1;
   if (handVideo) {
     handVideo.srcObject = null;
@@ -783,12 +845,13 @@ function updateHandTracking() {
   }
   const now = performance.now();
   if (now - lastHandFrameTime < handFrameIntervalMs || handVideo.currentTime === lastHandVideoTime) return;
-  lastHandFrameTime = now;
-  lastHandVideoTime = handVideo.currentTime;
 
   if (handWorker) {
     if (handDetectionPending) return;
+    lastHandFrameTime = now;
+    lastHandVideoTime = handVideo.currentTime;
     handDetectionPending = true;
+    handFlightVideoTime = handVideo.currentTime;
     createHandTrackingBitmap(handVideo).then((bitmap) => {
       if (!handTrackingActive || !handWorker || !handWorkerReady) {
         bitmap.close();
@@ -803,10 +866,13 @@ function updateHandTracking() {
     return;
   }
 
+  lastHandFrameTime = now;
+  lastHandVideoTime = handVideo.currentTime;
   try {
     const startedAt = performance.now();
     const result = handLandmarker.detectForVideo(handVideo, now);
     updateHandFrameInterval(performance.now() - startedAt, false);
+    recordHandTrackingResult();
     processHandLandmarks(result.landmarks[0], now);
   } catch (error) {
     handleHandTrackingFailure(error);
@@ -814,7 +880,9 @@ function updateHandTracking() {
 }
 
 async function createHandTrackingBitmap(video) {
-  if (handInputWidth >= 320) return createImageBitmap(video);
+  if (video.videoWidth <= handInputWidth && video.videoHeight <= handInputWidth * 0.75) {
+    return createImageBitmap(video);
+  }
   try {
     return await createImageBitmap(video, {
       resizeWidth: handInputWidth,
@@ -830,6 +898,15 @@ async function createHandTrackingBitmap(video) {
 
 function processHandLandmarks(landmarks, now) {
   if (!handTrackingActive) return;
+  if (landmarks instanceof Float32Array) {
+    for (let index = 0; index < handLandmarkBuffer.length; index += 1) {
+      const offset = index * 3;
+      handLandmarkBuffer[index].x = landmarks[offset];
+      handLandmarkBuffer[index].y = landmarks[offset + 1];
+      handLandmarkBuffer[index].z = landmarks[offset + 2];
+    }
+    landmarks = handLandmarkBuffer;
+  }
   if (!landmarks) {
     handRig.visible = false;
     handCursor.visible = false;
@@ -873,17 +950,49 @@ function handleHandTrackingFailure(error) {
 }
 
 function screenPointToWorld(x, y, depth, zOffset = 0) {
-  const viewHeight = 2 * depth * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const viewHeight = depth * handCameraViewScale;
   const viewWidth = viewHeight * camera.aspect;
-  handWorldPoint.set((x - 0.5) * viewWidth, (0.5 - y) * viewHeight, -depth + zOffset);
-  return handWorldPoint.applyQuaternion(camera.quaternion).add(camera.position);
+  handWorldPoint
+    .copy(camera.position)
+    .addScaledVector(handCameraRight, (x - 0.5) * viewWidth)
+    .addScaledVector(handCameraUp, (0.5 - y) * viewHeight)
+    .addScaledVector(handCameraBack, -depth + zOffset);
+  return handWorldPoint;
 }
 
 function updateHandPose(landmarks) {
+  handCameraRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  handCameraUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  handCameraBack.set(0, 0, 1).applyQuaternion(camera.quaternion);
+  let landmarksMoved = !handPoseInitialized;
+  const cameraUnchanged =
+    handPoseInitialized && Math.abs(previousHandCameraQuaternion.dot(camera.quaternion)) > 0.9999999;
   for (let i = 0; i < landmarks.length; i += 1) {
     const landmark = landmarks[i];
+    const offset = i * 3;
+    if (
+      Math.abs(landmark.x - previousHandLandmarks[offset]) > 0.0005 ||
+      Math.abs(landmark.y - previousHandLandmarks[offset + 1]) > 0.0005 ||
+      Math.abs(landmark.z - previousHandLandmarks[offset + 2]) > 0.0005
+    ) {
+      landmarksMoved = true;
+    }
+  }
+  if (!landmarksMoved && cameraUnchanged) {
+    handCursor.position.copy(screenPointToWorld(landmarks[8].x, landmarks[8].y, 1.2, landmarks[8].z * 0.35));
+    return;
+  }
+
+  for (let i = 0; i < landmarks.length; i += 1) {
+    const landmark = landmarks[i];
+    const offset = i * 3;
+    previousHandLandmarks[offset] = landmark.x;
+    previousHandLandmarks[offset + 1] = landmark.y;
+    previousHandLandmarks[offset + 2] = landmark.z;
     handPoints[i].copy(screenPointToWorld(landmark.x, landmark.y, 1.2, landmark.z * 0.35));
   }
+  previousHandCameraQuaternion.copy(camera.quaternion);
+  handPoseInitialized = true;
 
   const handWidth = Math.max(handPoints[5].distanceTo(handPoints[17]), handPoints[0].distanceTo(handPoints[9]) * 0.55);
   for (let i = 0; i < handConnections.length; i += 1) {

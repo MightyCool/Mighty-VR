@@ -691,6 +691,18 @@ input:focus-visible {
   pointer-events: none;
 }
 
+#hand-tracking-performance {
+  display: block;
+  margin-top: 4px;
+  color: #aeb4c2;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+#hand-tracking-performance[hidden] {
+  display: none;
+}
+
 .motion-copy {
   min-width: 0;
 }

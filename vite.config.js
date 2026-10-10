@@ -5,10 +5,7 @@ import { defineConfig } from "vite";
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
 const outputRoot = resolve(projectRoot, "dist");
-const wasmSource = resolve(
-  projectRoot,
-  "node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_nosimd_internal",
-);
+const wasmRuntimes = ["vision_wasm_internal", "vision_wasm_nosimd_internal"];
 
 function copyHandTrackingAssets() {
   return {
@@ -25,8 +22,13 @@ function copyHandTrackingAssets() {
           resolve(projectRoot, "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs"),
           visionBundleOutput,
         ),
-        copyFile(`${wasmSource}.js`, resolve(wasmOutput, "vision_wasm_nosimd_internal.js")),
-        copyFile(`${wasmSource}.wasm`, resolve(wasmOutput, "vision_wasm_nosimd_internal.wasm")),
+        ...wasmRuntimes.flatMap((runtime) => {
+          const source = resolve(projectRoot, `node_modules/@mediapipe/tasks-vision/wasm/${runtime}`);
+          return [
+            copyFile(`${source}.js`, resolve(wasmOutput, `${runtime}.js`)),
+            copyFile(`${source}.wasm`, resolve(wasmOutput, `${runtime}.wasm`)),
+          ];
+        }),
         copyFile(resolve(projectRoot, "assets/hand_landmarker.task"), modelOutput),
       ]);
     },

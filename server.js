@@ -16,6 +16,8 @@ const publicFiles = new Set([
   "assets/hand_landmarker.task",
   "node_modules/three/build/three.module.js",
   "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs",
+  "node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js",
+  "node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm",
   "node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_nosimd_internal.js",
   "node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_nosimd_internal.wasm",
 ]);
