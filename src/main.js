@@ -47,23 +47,16 @@ let handProfileResultCount = 0;
 let handProfileDroppedFrames = 0;
 let handFlightVideoTime = 0;
 let handCameraFrameRate = 30;
-let handWasPinching = false;
-let handPoseInitialized = false;
-let handRig;
-let handJoints;
-let handCursor;
-let handLauncher;
-let handMenu;
-let handMenuCanvas;
-let handMenuContext;
-let handMenuTexture;
-let handMenuOpen = false;
-let handLauncherShown = false;
-let handTouchTarget = null;
-let handTouchStartedAt = 0;
-let handTouchActivated = false;
-let handHoveredTarget = null;
-let handSegments;
+let handStates = [];
+let handLogo;
+let handLogoTexture;
+let handUiPanel;
+let handUiCanvas;
+let handUiContext;
+let handUiTexture;
+let handUiMode = "closed";
+let lastHandUiActivation = "";
+let lastHandUiActivationAt = 0;
 let orientationAvailable = typeof window.DeviceOrientationEvent === "function";
 let orientationState = "off";
 let currentOrientation = null;
@@ -87,15 +80,13 @@ const handCameraRight = new THREE.Vector3();
 const handCameraUp = new THREE.Vector3();
 const handCameraBack = new THREE.Vector3();
 const handCameraViewScale = 2 * Math.tan(THREE.MathUtils.degToRad(76 / 2));
-const handPoints = Array.from({ length: 21 }, () => new THREE.Vector3());
-const handLandmarkBuffer = Array.from({ length: 21 }, () => ({ x: 0, y: 0, z: 0 }));
-const previousHandLandmarks = new Float32Array(21 * 3);
-const previousHandCameraQuaternion = new THREE.Quaternion();
 const handSegmentDirection = new THREE.Vector3();
 const handInstanceScale = new THREE.Vector3();
 const handInstanceMatrix = new THREE.Matrix4();
 const handSegmentQuaternion = new THREE.Quaternion();
 const handIdentityQuaternion = new THREE.Quaternion();
+const handPanelPoint = new THREE.Vector3();
+const handLogoPoint = new THREE.Vector3();
 const supportsWasmSimd = (() => {
   if (typeof WebAssembly === "undefined") return false;
   const simdTest = new Uint8Array([
@@ -180,7 +171,10 @@ document.addEventListener("visibilitychange", () => {
     });
   }
 });
-motionOrientation.addEventListener("change", refreshScreenOrientation);
+motionOrientation.addEventListener("change", () => {
+  refreshScreenOrientation();
+  drawHandUi();
+});
 window.screen?.orientation?.addEventListener("change", refreshScreenOrientation);
 document.querySelector("#stereo-exit").addEventListener("click", () => {
   stereoToggle.checked = false;
@@ -197,12 +191,14 @@ stereoToggle.addEventListener("change", () => {
     stereoToggle.focus({ preventScroll: true });
   }
   if (renderer && camera) resizeRenderer();
+  drawHandUi();
 });
 
 sensitivitySlider.addEventListener("input", () => {
   sensitivity = Number(sensitivitySlider.value);
   sensitivityValue.value = `${sensitivity.toFixed(1)}×`;
   sensitivityValue.textContent = sensitivityValue.value;
+  drawHandUi();
 });
 
 motionButton.addEventListener("click", enableMotion);
@@ -212,6 +208,7 @@ handTrackingButton.addEventListener("click", () => {
   } else {
     startHandTracking();
   }
+  drawHandUi();
 });
 stage.addEventListener("pointerdown", onPointerDown);
 stage.addEventListener("pointermove", onPointerMove);
@@ -241,6 +238,7 @@ function setMotionStatus(state, message) {
 
   const label = state === "active" ? "MOTION ON" : state === "listening" ? "WAITING" : state === "warning" ? "CHECK MOTION" : "MOTION OFF";
   motionIndicator.lastChild.textContent = ` ${label}`;
+  drawHandUi();
 }
 
 function updateMotionReadout(event) {
@@ -402,73 +400,116 @@ function createScene() {
 }
 
 function buildHandOverlay() {
-  handRig = new THREE.Group();
+  const segmentGeometry = new THREE.CylinderGeometry(1, 1, 1, 6);
+  const jointGeometry = new THREE.SphereGeometry(1, 6, 5);
   const handMaterial = new THREE.MeshStandardMaterial({
     color: 0xd7a986,
     roughness: 0.58,
-    depthTest: false,
+    depthTest: true,
   });
-  const segmentGeometry = new THREE.CylinderGeometry(1, 1, 1, 6);
-  handSegments = new THREE.InstancedMesh(segmentGeometry, handMaterial, handConnections.length);
-  handSegments.renderOrder = 15;
-  handSegments.frustumCulled = false;
-  handRig.add(handSegments);
+  handStates = ["left", "right"].map((side, index) => {
+    const rig = new THREE.Group();
+    const segments = new THREE.InstancedMesh(
+      segmentGeometry,
+      handMaterial,
+      handConnections.length,
+    );
+    segments.renderOrder = 15;
+    segments.frustumCulled = false;
+    rig.add(segments);
 
-  const jointGeometry = new THREE.SphereGeometry(1, 6, 5);
-  const jointMaterial = new THREE.MeshStandardMaterial({ color: 0xe2b99a, roughness: 0.55, depthTest: false });
-  handJoints = new THREE.InstancedMesh(jointGeometry, jointMaterial, 21);
-  handJoints.renderOrder = 15;
-  handJoints.frustumCulled = false;
-  handRig.add(handJoints);
-  handRig.visible = false;
-  handRig.renderOrder = 15;
-  scene.add(handRig);
+    const joints = new THREE.InstancedMesh(
+      jointGeometry,
+      new THREE.MeshStandardMaterial({
+        color: index === 0 ? 0xe2b99a : 0xf0c69f,
+        roughness: 0.55,
+        depthTest: true,
+      }),
+      21,
+    );
+    joints.renderOrder = 15;
+    joints.frustumCulled = false;
+    rig.add(joints);
+    rig.visible = false;
+    rig.renderOrder = 15;
+    scene.add(rig);
 
-  handCursor = new THREE.Mesh(
-    new THREE.SphereGeometry(0.035, 12, 8),
-    new THREE.MeshBasicMaterial({ color: 0xffd17c }),
+    const cursor = new THREE.Mesh(
+      new THREE.SphereGeometry(0.035, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0xffd17c, depthTest: true }),
+    );
+    cursor.visible = false;
+    cursor.renderOrder = 16;
+    scene.add(cursor);
+
+    return {
+      side,
+      rig,
+      segments,
+      joints,
+      cursor,
+      landmarks: Array.from({ length: 21 }, () => ({ x: 0, y: 0, z: 0 })),
+      points: Array.from({ length: 21 }, () => new THREE.Vector3()),
+      previousLandmarks: new Float32Array(21 * 3),
+      previousCameraQuaternion: new THREE.Quaternion(),
+      previousDepth: 0,
+      poseInitialized: false,
+      wasPinching: false,
+      touchTarget: null,
+      touchStartedAt: 0,
+      touchActivated: false,
+      requiresRelease: false,
+      visible: false,
+    };
+  });
+
+  const logoCanvas = document.createElement("canvas");
+  logoCanvas.width = 256;
+  logoCanvas.height = 128;
+  const logoContext = logoCanvas.getContext("2d");
+  logoContext.fillStyle = "#171a22";
+  roundedRectPath(logoContext, 4, 4, 248, 120, 30);
+  logoContext.fill();
+  logoContext.strokeStyle = "#b9f3d4";
+  logoContext.lineWidth = 5;
+  logoContext.stroke();
+  logoContext.fillStyle = "#b9f3d4";
+  logoContext.font = "600 52px sans-serif";
+  logoContext.textAlign = "center";
+  logoContext.textBaseline = "middle";
+  logoContext.fillText("◉ MVR", 128, 64);
+  handLogoTexture = new THREE.CanvasTexture(logoCanvas);
+  handLogo = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.2, 0.1),
+    new THREE.MeshBasicMaterial({
+      map: handLogoTexture,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+    }),
   );
-  handCursor.visible = false;
-  handCursor.renderOrder = 16;
-  scene.add(handCursor);
+  handLogo.visible = false;
+  handLogo.renderOrder = 16;
+  scene.add(handLogo);
 
-  const launcherCanvas = document.createElement("canvas");
-  launcherCanvas.width = 320;
-  launcherCanvas.height = 150;
-  const launcherContext = launcherCanvas.getContext("2d");
-  launcherContext.fillStyle = "#171a22ee";
-  roundedRectPath(launcherContext, 4, 4, 312, 142, 28);
-  launcherContext.fill();
-  launcherContext.strokeStyle = "#b9f3d4";
-  launcherContext.lineWidth = 5;
-  launcherContext.stroke();
-  launcherContext.fillStyle = "#b9f3d4";
-  launcherContext.font = "600 62px sans-serif";
-  launcherContext.textAlign = "center";
-  launcherContext.textBaseline = "middle";
-  launcherContext.fillText("◉ MVR", 160, 75);
-  const launcherTexture = new THREE.CanvasTexture(launcherCanvas);
-  handLauncher = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.54, 0.26),
-    new THREE.MeshBasicMaterial({ map: launcherTexture, transparent: true, depthTest: false }),
+  handUiCanvas = document.createElement("canvas");
+  handUiCanvas.width = 800;
+  handUiCanvas.height = 640;
+  handUiContext = handUiCanvas.getContext("2d");
+  handUiTexture = new THREE.CanvasTexture(handUiCanvas);
+  handUiPanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.2, 0.96),
+    new THREE.MeshBasicMaterial({
+      map: handUiTexture,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+    }),
   );
-  handLauncher.visible = false;
-  handLauncher.renderOrder = 10;
-  scene.add(handLauncher);
-
-  handMenuCanvas = document.createElement("canvas");
-  handMenuCanvas.width = 512;
-  handMenuCanvas.height = 640;
-  handMenuContext = handMenuCanvas.getContext("2d");
-  handMenuTexture = new THREE.CanvasTexture(handMenuCanvas);
-  handMenu = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.82, 1.02),
-    new THREE.MeshBasicMaterial({ map: handMenuTexture, transparent: true, depthTest: false }),
-  );
-  handMenu.visible = false;
-  handMenu.renderOrder = 11;
-  scene.add(handMenu);
-  drawHandMenu();
+  handUiPanel.visible = false;
+  handUiPanel.renderOrder = 12;
+  scene.add(handUiPanel);
+  drawHandUi();
 }
 
 async function startHandTracking() {
@@ -576,7 +617,8 @@ async function startHandTracking() {
     }
     handTrackingButton.disabled = false;
     handTrackingButton.textContent = "Stop hand tracking";
-    handTrackingStatus.textContent = "Rear camera active. Show your hand, then pinch to bring up the MVR button.";
+    handTrackingStatus.textContent = "Rear camera active. Show one or both hands; the MVR logo stays attached to your right hand.";
+    drawHandUi();
   } catch (error) {
     console.error("Unable to start hand tracking:", error);
     stopCameraStream();
@@ -606,7 +648,7 @@ async function initializeHandTrackerOnMainThread() {
   handLandmarker = await HandLandmarkerClass.createFromOptions(wasmFileset, {
     baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "CPU" },
     runningMode: "VIDEO",
-    numHands: 1,
+    numHands: 2,
     minHandDetectionConfidence: 0.55,
     minHandPresenceConfidence: 0.5,
     minTrackingConfidence: 0.5,
@@ -633,7 +675,7 @@ function startHandWorker() {
         handDetectionPending = false;
         updateHandFrameInterval(Math.max(data.inferenceMs, performance.now() - data.timestamp), true);
         recordHandTrackingResult();
-        processHandLandmarks(data.landmarks, data.timestamp);
+        processHandLandmarks(data.landmarks, data.handedness, data.timestamp);
         updateHandTracking();
       }
     };
@@ -803,7 +845,7 @@ function stopCameraStream() {
   handProfileDroppedFrames = 0;
   handTrackingPerformance.hidden = true;
   handTrackingPerformance.textContent = "";
-  handPoseInitialized = false;
+  for (const state of handStates) state.poseInitialized = false;
   lastHandVideoTime = -1;
   if (handVideo) {
     handVideo.srcObject = null;
@@ -825,17 +867,23 @@ function stopHandTracking() {
 }
 
 function resetHandOverlays() {
-  handRig && (handRig.visible = false);
-  handCursor && (handCursor.visible = false);
-  handLauncher && (handLauncher.visible = false);
-  handMenu && (handMenu.visible = false);
-  handLauncherShown = false;
-  handMenuOpen = false;
-  handWasPinching = false;
-  handTouchTarget = null;
-  handTouchStartedAt = 0;
-  handTouchActivated = false;
-  handHoveredTarget = null;
+  for (const state of handStates) {
+    state.rig.visible = false;
+    state.cursor.visible = false;
+    state.visible = false;
+    state.wasPinching = false;
+    state.touchTarget = null;
+    state.touchStartedAt = 0;
+    state.touchActivated = false;
+    state.requiresRelease = false;
+    state.poseInitialized = false;
+  }
+  handLogo && (handLogo.visible = false);
+  handUiMode = "closed";
+  lastHandUiActivation = "";
+  lastHandUiActivationAt = 0;
+  handUiPanel && (handUiPanel.visible = false);
+  drawHandUi();
 }
 
 function updateHandTracking() {
@@ -873,7 +921,11 @@ function updateHandTracking() {
     const result = handLandmarker.detectForVideo(handVideo, now);
     updateHandFrameInterval(performance.now() - startedAt, false);
     recordHandTrackingResult();
-    processHandLandmarks(result.landmarks[0], now);
+    processHandLandmarks(
+      result.landmarks,
+      result.handedness?.map((hand) => hand[0]?.categoryName?.toLowerCase()),
+      now,
+    );
   } catch (error) {
     handleHandTrackingFailure(error);
   }
@@ -896,47 +948,103 @@ async function createHandTrackingBitmap(video) {
   }
 }
 
-function processHandLandmarks(landmarks, now) {
+function processHandLandmarks(hands, handedness, now) {
   if (!handTrackingActive) return;
-  if (landmarks instanceof Float32Array) {
-    for (let index = 0; index < handLandmarkBuffer.length; index += 1) {
-      const offset = index * 3;
-      handLandmarkBuffer[index].x = landmarks[offset];
-      handLandmarkBuffer[index].y = landmarks[offset + 1];
-      handLandmarkBuffer[index].z = landmarks[offset + 2];
+  for (const state of handStates) state.visible = false;
+
+  const isPacked = hands instanceof Float32Array;
+  const handCount = isPacked ? hands.length / (21 * 3) : hands?.length || 0;
+  for (let handIndex = 0; handIndex < Math.min(handCount, handStates.length); handIndex += 1) {
+    const side = handedness?.[handIndex];
+    const sideIndex = side === "left" ? 0 : side === "right" ? 1 : handIndex;
+    const state = handStates[sideIndex] || handStates[handIndex];
+    if (isPacked) {
+      const offset = handIndex * 21 * 3;
+      for (let index = 0; index < state.landmarks.length; index += 1) {
+        const landmarkOffset = offset + index * 3;
+        state.landmarks[index].x = hands[landmarkOffset];
+        state.landmarks[index].y = hands[landmarkOffset + 1];
+        state.landmarks[index].z = hands[landmarkOffset + 2];
+      }
+    } else {
+      for (let index = 0; index < state.landmarks.length; index += 1) {
+        const landmark = hands[handIndex][index];
+        state.landmarks[index].x = landmark.x;
+        state.landmarks[index].y = landmark.y;
+        state.landmarks[index].z = landmark.z;
+      }
     }
-    landmarks = handLandmarkBuffer;
-  }
-  if (!landmarks) {
-    handRig.visible = false;
-    handCursor.visible = false;
-    handWasPinching = false;
-    updateHandTouch(null, 0, now);
-    if (handTrackingStatus.textContent !== "Looking for a hand. Move it into the rear camera view.") {
-      handTrackingStatus.textContent = "Looking for a hand. Move it into the rear camera view.";
-    }
-    return;
+    state.visible = true;
   }
 
-  handRig.visible = true;
-  handCursor.visible = true;
-  if (handTrackingStatus.textContent !== "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.") {
-    handTrackingStatus.textContent = "Hand tracked. Pinch anywhere to show MVR, then pinch the button or a menu control.";
+  handCameraRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  handCameraUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  handCameraBack.set(0, 0, 1).applyQuaternion(camera.quaternion);
+  for (const state of handStates) {
+    state.rig.visible = state.visible;
+    state.cursor.visible = state.visible;
+    if (state.visible) {
+      const landmarks = state.landmarks;
+      const palmSize = Math.hypot(
+        landmarks[9].x - landmarks[0].x,
+        landmarks[9].y - landmarks[0].y,
+      );
+      updateHandPose(state, landmarks, palmSize);
+    } else {
+      state.wasPinching = false;
+      updateHandTouch(state, null, now);
+    }
   }
-  updateHandPose(landmarks);
 
-  const palmSize = Math.hypot(landmarks[9].x - landmarks[0].x, landmarks[9].y - landmarks[0].y);
-  const pinchDistance = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y);
-  const isPinching = palmSize > 0 && pinchDistance / palmSize < 0.34;
-  const fingertip = landmarks[8];
-  const touchTarget = getHandTouchTarget(fingertip.x, fingertip.y);
-  updateHandTouch(touchTarget, fingertip.x, now);
-  if (isPinching && !handWasPinching) handleHandPinch(fingertip.x, fingertip.y);
-  handWasPinching = isPinching;
-  handCursor.scale.setScalar(isPinching ? 1.5 : 1);
-  handCursor.material.color.set(
-    handTouchTarget && handTouchActivated ? 0x6de0a0 : isPinching ? 0xffd17c : 0xb9f3d4,
-  );
+  const rightHand = handStates.find((state) => state.side === "right");
+  handLogo.visible = Boolean(rightHand?.visible);
+  if (rightHand?.visible) {
+    handLogo.position.copy(rightHand.points[9]).addScaledVector(handCameraBack, -0.025);
+    handLogo.quaternion.copy(camera.quaternion);
+  }
+
+  handUiPanel.visible = handUiMode !== "closed";
+  if (handUiPanel.visible) {
+    handUiPanel.position.copy(screenPointToWorld(0.5, 0.5, 0.9));
+    handUiPanel.quaternion.copy(camera.quaternion);
+    handUiPanel.updateMatrixWorld(true);
+  }
+
+  let visibleHands = 0;
+  for (const state of handStates) {
+    if (!state.visible) continue;
+    visibleHands += 1;
+    const landmarks = state.landmarks;
+    const palmSize = Math.hypot(
+      landmarks[9].x - landmarks[0].x,
+      landmarks[9].y - landmarks[0].y,
+    );
+    const pinchDistance = Math.hypot(
+      landmarks[4].x - landmarks[8].x,
+      landmarks[4].y - landmarks[8].y,
+    );
+    const isPinching = palmSize > 0 && pinchDistance / palmSize < 0.34;
+    const touchTarget = getHandTouchTarget(state, state.points[8]);
+    updateHandTouch(state, touchTarget, now);
+    if (isPinching && !state.wasPinching) {
+      if (touchTarget && !state.touchActivated) {
+        state.touchActivated = true;
+        activateHandTarget(touchTarget, now);
+      } else if (state.side === "right" && handUiMode === "closed") {
+        activateHandTarget("mvr-logo", now);
+      }
+    }
+    state.wasPinching = isPinching;
+    state.cursor.scale.setScalar(isPinching ? 1.5 : 1);
+    state.cursor.material.color.set(
+      state.touchTarget && state.touchActivated ? 0x6de0a0 : isPinching ? 0xffd17c : 0xb9f3d4,
+    );
+  }
+
+  const status = visibleHands
+    ? `${visibleHands} hand${visibleHands === 1 ? "" : "s"} tracked. Touch the MVR logo to open the app menu, then touch Settings.`
+    : "Looking for hands. Move one or both into the rear camera view.";
+  if (handTrackingStatus.textContent !== status) handTrackingStatus.textContent = status;
 }
 
 function handleHandTrackingFailure(error) {
@@ -960,204 +1068,281 @@ function screenPointToWorld(x, y, depth, zOffset = 0) {
   return handWorldPoint;
 }
 
-function updateHandPose(landmarks) {
-  handCameraRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
-  handCameraUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
-  handCameraBack.set(0, 0, 1).applyQuaternion(camera.quaternion);
-  let landmarksMoved = !handPoseInitialized;
+function updateHandPose(state, landmarks, palmSize) {
+  state.depth = THREE.MathUtils.clamp(0.11 / Math.max(palmSize, 0.001), 0.45, 2.2);
+  let landmarksMoved =
+    !state.poseInitialized || Math.abs(state.depth - state.previousDepth) > 0.001;
   const cameraUnchanged =
-    handPoseInitialized && Math.abs(previousHandCameraQuaternion.dot(camera.quaternion)) > 0.9999999;
+    state.poseInitialized &&
+    Math.abs(state.previousCameraQuaternion.dot(camera.quaternion)) > 0.9999999;
   for (let i = 0; i < landmarks.length; i += 1) {
     const landmark = landmarks[i];
     const offset = i * 3;
     if (
-      Math.abs(landmark.x - previousHandLandmarks[offset]) > 0.0005 ||
-      Math.abs(landmark.y - previousHandLandmarks[offset + 1]) > 0.0005 ||
-      Math.abs(landmark.z - previousHandLandmarks[offset + 2]) > 0.0005
+      Math.abs(landmark.x - state.previousLandmarks[offset]) > 0.0005 ||
+      Math.abs(landmark.y - state.previousLandmarks[offset + 1]) > 0.0005 ||
+      Math.abs(landmark.z - state.previousLandmarks[offset + 2]) > 0.0005
     ) {
       landmarksMoved = true;
     }
   }
   if (!landmarksMoved && cameraUnchanged) {
-    handCursor.position.copy(screenPointToWorld(landmarks[8].x, landmarks[8].y, 1.2, landmarks[8].z * 0.35));
+    state.points[8].copy(
+      screenPointToWorld(landmarks[8].x, landmarks[8].y, state.depth, landmarks[8].z * state.depth * 1.5),
+    );
+    state.cursor.position.copy(state.points[8]);
     return;
   }
 
   for (let i = 0; i < landmarks.length; i += 1) {
     const landmark = landmarks[i];
     const offset = i * 3;
-    previousHandLandmarks[offset] = landmark.x;
-    previousHandLandmarks[offset + 1] = landmark.y;
-    previousHandLandmarks[offset + 2] = landmark.z;
-    handPoints[i].copy(screenPointToWorld(landmark.x, landmark.y, 1.2, landmark.z * 0.35));
+    state.previousLandmarks[offset] = landmark.x;
+    state.previousLandmarks[offset + 1] = landmark.y;
+    state.previousLandmarks[offset + 2] = landmark.z;
+    state.points[i].copy(
+      screenPointToWorld(
+        landmark.x,
+        landmark.y,
+        state.depth,
+        landmark.z * state.depth * 1.5,
+      ),
+    );
   }
-  previousHandCameraQuaternion.copy(camera.quaternion);
-  handPoseInitialized = true;
+  state.previousCameraQuaternion.copy(camera.quaternion);
+  state.previousDepth = state.depth;
+  state.poseInitialized = true;
 
-  const handWidth = Math.max(handPoints[5].distanceTo(handPoints[17]), handPoints[0].distanceTo(handPoints[9]) * 0.55);
+  const handWidth = Math.max(
+    state.points[5].distanceTo(state.points[17]),
+    state.points[0].distanceTo(state.points[9]) * 0.55,
+  );
   for (let i = 0; i < handConnections.length; i += 1) {
     const [start, end] = handConnections[i];
-    handSegmentDirection.subVectors(handPoints[end], handPoints[start]);
+    handSegmentDirection.subVectors(state.points[end], state.points[start]);
     const length = handSegmentDirection.length();
     handSegmentDirection.normalize();
     handSegmentQuaternion.setFromUnitVectors(WORLD_UP, handSegmentDirection);
     const radiusScale = start === 0 || end === 0 ? 0.075 : 0.055;
     handInstanceScale.set(handWidth * radiusScale, length, handWidth * radiusScale);
     handSegmentDirection
-      .copy(handPoints[start])
-      .add(handPoints[end])
+      .copy(state.points[start])
+      .add(state.points[end])
       .multiplyScalar(0.5);
     handInstanceMatrix.compose(handSegmentDirection, handSegmentQuaternion, handInstanceScale);
-    handSegments.setMatrixAt(i, handInstanceMatrix);
+    state.segments.setMatrixAt(i, handInstanceMatrix);
   }
-  handSegments.instanceMatrix.needsUpdate = true;
+  state.segments.instanceMatrix.needsUpdate = true;
 
-  for (let i = 0; i < handPoints.length; i += 1) {
+  for (let i = 0; i < state.points.length; i += 1) {
     handInstanceScale.setScalar(handWidth * (i === 0 ? 0.105 : 0.09));
-    handInstanceMatrix.compose(handPoints[i], handIdentityQuaternion, handInstanceScale);
-    handJoints.setMatrixAt(i, handInstanceMatrix);
+    handInstanceMatrix.compose(state.points[i], handIdentityQuaternion, handInstanceScale);
+    state.joints.setMatrixAt(i, handInstanceMatrix);
   }
-  handJoints.instanceMatrix.needsUpdate = true;
-
-  handCursor.position.copy(handPoints[8]);
-
-  if (handLauncherShown) {
-    handLauncher.visible = !handMenuOpen;
-    handLauncher.position.copy(screenPointToWorld(0.79, 0.2, 1.15));
-    handLauncher.quaternion.copy(camera.quaternion);
-  }
-  if (handMenuOpen) {
-    handMenu.visible = true;
-    handMenu.position.copy(screenPointToWorld(0.5, 0.51, 1.25));
-    handMenu.quaternion.copy(camera.quaternion);
-  }
+  state.joints.instanceMatrix.needsUpdate = true;
+  state.cursor.position.copy(state.points[8]);
 }
 
-function handleHandPinch(x, y) {
-  if (!handLauncherShown) {
-    handLauncherShown = true;
-    handLauncher.visible = true;
-    return;
+function getHandTouchTarget(state, fingertip) {
+  if (handLogo.visible) {
+    handLogoPoint.copy(fingertip);
+    handLogo.worldToLocal(handLogoPoint);
+    if (
+      Math.abs(handLogoPoint.z) < 0.055 &&
+      Math.abs(handLogoPoint.x) <= 0.1 &&
+      Math.abs(handLogoPoint.y) <= 0.05
+    ) {
+      return "mvr-logo";
+    }
   }
+  if (!handUiPanel.visible) return null;
 
-  const target = getHandTouchTarget(x, y);
-  activateHandTarget(target, x);
-}
-
-function getMenuScreenBounds() {
-  const depth = 1.25;
-  const viewHeight = 2 * depth * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-  const viewWidth = viewHeight * camera.aspect;
-  const width = handMenu.geometry.parameters.width / viewWidth;
-  const height = handMenu.geometry.parameters.height / viewHeight;
-  return { left: 0.5 - width / 2, right: 0.5 + width / 2, top: 0.51 - height / 2, bottom: 0.51 + height / 2 };
-}
-
-function getHandTouchTarget(x, y) {
-  if (!handLauncherShown) return null;
-  if (!handMenuOpen) {
-    return x >= 0.66 && x <= 0.92 && y >= 0.12 && y <= 0.28 ? "launcher" : null;
+  handPanelPoint.copy(fingertip);
+  handUiPanel.worldToLocal(handPanelPoint);
+  if (
+    Math.abs(handPanelPoint.z) > 0.07 ||
+    Math.abs(handPanelPoint.x) > 0.6 ||
+    Math.abs(handPanelPoint.y) > 0.48
+  ) {
+    return null;
   }
-
-  const bounds = getMenuScreenBounds();
-  if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return null;
-  const canvasX = ((x - bounds.left) / (bounds.right - bounds.left)) * handMenuCanvas.width;
-  const canvasY = ((y - bounds.top) / (bounds.bottom - bounds.top)) * handMenuCanvas.height;
-  if ((canvasY <= 92 && canvasX >= 420) || canvasY >= 570) return "close";
-  if (canvasY >= 112 && canvasY <= 218) return canvasX < 256 ? "sensitivity-down" : "sensitivity-up";
-  if (canvasY >= 236 && canvasY <= 330) return "orientation";
-  if (canvasY >= 348 && canvasY <= 442) return "stereo";
-  if (canvasY >= 460 && canvasY <= 554) return "recenter";
+  const x = (handPanelPoint.x / 1.2 + 0.5) * handUiCanvas.width;
+  const y = (0.5 - handPanelPoint.y / 0.96) * handUiCanvas.height;
+  if (handUiMode === "menu") {
+    if (x >= 705 && y >= 220 && y <= 420) return "app-close";
+    if (x >= 300 && x <= 540 && y >= 220 && y <= 420) return "app-settings";
+    return null;
+  }
+  if (x >= 715 && y <= 95) return "settings-close";
+  if (x <= 165 && y <= 100) return "settings-back";
+  if (y >= 120 && y <= 200) return "setting-motion";
+  if (y >= 205 && y <= 285) return "setting-tracking";
+  if (y >= 290 && y <= 370) return "setting-display";
+  if (y >= 375 && y <= 455) return "setting-orientation";
+  if (y >= 460 && y <= 540 && x >= 640) return x < 700 ? "sensitivity-down" : "sensitivity-up";
+  if (y >= 545 && y <= 625) return "setting-recenter";
   return null;
 }
 
-function updateHandTouch(target, x, now) {
-  if (target !== handTouchTarget) {
-    handTouchTarget = target;
-    handTouchStartedAt = now;
-    handTouchActivated = false;
-    if (handHoveredTarget !== target) {
-      handHoveredTarget = target;
-      if (handMenuOpen) drawHandMenu();
+function updateHandTouch(state, target, now) {
+  if (state.requiresRelease) {
+    if (!target) {
+      state.requiresRelease = false;
+      state.touchTarget = null;
+      state.touchStartedAt = now;
+      state.touchActivated = false;
     }
     return;
   }
-  if (!target || handTouchActivated || now - handTouchStartedAt < 350) return;
-  handTouchActivated = true;
-  activateHandTarget(target, x);
-}
-
-function activateHandTarget(target, x) {
-  if (target === "launcher") {
-    handMenuOpen = true;
-    handLauncher.visible = false;
-    handMenu.visible = true;
-    drawHandMenu();
+  if (target !== state.touchTarget) {
+    state.touchTarget = target;
+    state.touchStartedAt = now;
+    state.touchActivated = false;
+    if (target) drawHandUi();
     return;
   }
-  if (!target) return;
+  if (!target || state.touchActivated || now - state.touchStartedAt < 140) return;
+  state.touchActivated = true;
+  activateHandTarget(target, now);
+}
 
-  if (target === "close") {
-    handMenuOpen = false;
-    handMenu.visible = false;
-    handLauncher.visible = true;
+function activateHandTarget(target, now = performance.now()) {
+  if (target === lastHandUiActivation && now - lastHandUiActivationAt < 100) return;
+  lastHandUiActivation = target;
+  lastHandUiActivationAt = now;
+  const previousMode = handUiMode;
+  if (target === "mvr-logo") {
+    handUiMode = handUiMode === "closed" ? "menu" : "closed";
+  } else if (target === "app-close" || target === "settings-close") {
+    handUiMode = "closed";
+  } else if (target === "app-settings") {
+    handUiMode = "settings";
+  } else if (target === "settings-back") {
+    handUiMode = "menu";
+  } else if (target === "setting-motion") {
+    if (
+      typeof window.DeviceOrientationEvent?.requestPermission === "function" &&
+      orientationState !== "active" &&
+      orientationState !== "listening"
+    ) {
+      setMotionStatus(
+        "warning",
+        "Safari needs a direct tap to grant motion access. Use Enable motion on the page, then return here.",
+      );
+    } else {
+      motionButton.click();
+    }
+  } else if (target === "setting-tracking") {
+    handTrackingButton.click();
+  } else if (target === "setting-display") {
+    stereoToggle.checked = !stereoToggle.checked;
+    stereoToggle.dispatchEvent(new Event("change", { bubbles: true }));
+  } else if (target === "setting-orientation") {
+    const nextMode = { auto: "portrait", portrait: "landscape", landscape: "auto" }[motionOrientation.value];
+    motionOrientation.value = nextMode;
+    motionOrientation.dispatchEvent(new Event("change", { bubbles: true }));
   } else if (target === "sensitivity-down" || target === "sensitivity-up") {
     const amount = target === "sensitivity-down" ? -0.1 : 0.1;
     sensitivitySlider.value = String(THREE.MathUtils.clamp(sensitivity + amount, 0.4, 2));
     sensitivitySlider.dispatchEvent(new Event("input", { bubbles: true }));
-  } else if (target === "orientation") {
-    const nextMode = { auto: "portrait", portrait: "landscape", landscape: "auto" }[motionOrientation.value];
-    motionOrientation.value = nextMode;
-    motionOrientation.dispatchEvent(new Event("change", { bubbles: true }));
-  } else if (target === "stereo") {
-    stereoToggle.checked = !stereoToggle.checked;
-    stereoToggle.dispatchEvent(new Event("change", { bubbles: true }));
-  } else if (target === "recenter") {
+  } else if (target === "setting-recenter") {
     recenterView();
   }
-  drawHandMenu();
+  if (handUiMode !== previousMode) {
+    for (const state of handStates) state.requiresRelease = true;
+  }
+  handUiPanel.visible = handUiMode !== "closed";
+  drawHandUi();
 }
 
-function drawHandMenu() {
-  if (!handMenuContext) return;
-  const context = handMenuContext;
-  context.clearRect(0, 0, handMenuCanvas.width, handMenuCanvas.height);
-  context.fillStyle = "#151822f2";
-  roundedRectPath(context, 8, 8, 496, 624, 32);
-  context.fill();
-  context.strokeStyle = "#b9f3d4";
-  context.lineWidth = 5;
-  context.stroke();
-  context.textAlign = "center";
+function drawHandUi() {
+  if (!handUiContext || !handUiTexture) return;
+  const context = handUiContext;
+  context.clearRect(0, 0, handUiCanvas.width, handUiCanvas.height);
+  if (handUiMode === "closed") {
+    handUiTexture.needsUpdate = true;
+    return;
+  }
   context.textBaseline = "middle";
   context.fillStyle = "#b9f3d4";
-  context.font = "600 38px sans-serif";
-  context.fillText("MVR  ·  ROOM SETTINGS", 256, 58);
-  context.font = "600 34px sans-serif";
-  context.fillText("×", 464, 56);
-  context.font = "22px sans-serif";
-  drawHandMenuButton(context, 34, 112, 444, 106, `Sensitivity    −   ${sensitivity.toFixed(1)}×   +`, handHoveredTarget?.startsWith("sensitivity"));
-  drawHandMenuButton(context, 34, 236, 444, 94, `Orientation    ${motionOrientation.value}`, handHoveredTarget === "orientation");
-  drawHandMenuButton(context, 34, 348, 444, 94, `Headset view    ${stereoToggle.checked ? "ON" : "OFF"}`, handHoveredTarget === "stereo");
-  drawHandMenuButton(context, 34, 460, 444, 94, "Recenter view", handHoveredTarget === "recenter");
-  context.fillStyle = "#b8b9c4";
-  context.font = "18px sans-serif";
-  context.fillText("Touch or pinch a control · Touch here to close", 256, 594);
-  handMenuTexture.needsUpdate = true;
+  context.textAlign = "left";
+
+  if (handUiMode === "menu") {
+    context.fillStyle = "#10141ef2";
+    roundedRectPath(context, 8, 220, 784, 200, 34);
+    context.fill();
+    context.strokeStyle = "#b9f3d4";
+    context.lineWidth = 3;
+    context.stroke();
+    context.font = "600 34px sans-serif";
+    context.fillText("MVR", 48, 282);
+    context.fillStyle = "#aeb4c2";
+    context.font = "20px sans-serif";
+    context.fillText("APP MENU", 48, 320);
+    drawHandUiButton(context, 300, 230, 240, 180, "⚙", "Settings", "Room & headset", "app-settings");
+    context.textAlign = "center";
+    context.font = "32px sans-serif";
+    context.fillStyle = "#f4f3f0";
+    context.fillText("×", 750, 280);
+  } else {
+    context.fillStyle = "#10141ef2";
+    roundedRectPath(context, 8, 8, 784, 624, 34);
+    context.fill();
+    context.strokeStyle = "#b9f3d4";
+    context.lineWidth = 3;
+    context.stroke();
+    context.font = "600 30px sans-serif";
+    context.fillText("‹", 42, 56);
+    context.font = "600 29px sans-serif";
+    context.fillText("Settings", 92, 56);
+    context.textAlign = "center";
+    context.font = "30px sans-serif";
+    context.fillStyle = "#f4f3f0";
+    context.fillText("×", 750, 56);
+    context.textAlign = "left";
+    context.fillStyle = "#aeb4c2";
+    context.font = "17px sans-serif";
+    context.fillText("PERSONALIZE YOUR MVR SPACE", 48, 93);
+    const motionDetail = orientationState === "active"
+      ? "Enabled"
+      : typeof window.DeviceOrientationEvent?.requestPermission === "function"
+        ? "Use the page control to allow Safari"
+        : "Tap to enable";
+    drawHandUiButton(context, 34, 120, 732, 80, "◉", "Phone motion", motionDetail, "setting-motion");
+    drawHandUiButton(context, 34, 205, 732, 80, "✋", "Hand tracking", handTrackingActive ? "On · two hands" : "Off", "setting-tracking");
+    drawHandUiButton(context, 34, 290, 732, 80, "▣", "Headset view", stereoToggle.checked ? "On" : "Off", "setting-display");
+    drawHandUiButton(context, 34, 375, 732, 80, "↻", "Phone orientation", motionOrientation.value, "setting-orientation");
+    drawHandUiButton(context, 34, 460, 732, 80, "◌", "Look sensitivity", `${sensitivity.toFixed(1)}×`, "sensitivity");
+    context.font = "600 26px sans-serif";
+    context.textAlign = "center";
+    context.fillStyle = "#f4f3f0";
+    context.fillText("−", 680, 500);
+    context.fillText("+", 730, 500);
+    drawHandUiButton(context, 34, 545, 732, 80, "◎", "Recenter view", "Reset your look direction", "setting-recenter");
+  }
+  handUiTexture.needsUpdate = true;
 }
 
-function drawHandMenuButton(context, x, y, width, height, label, hovered = false) {
-  context.fillStyle = hovered ? "#3d5148" : "#292d39";
+function drawHandUiButton(context, x, y, width, height, icon, title, detail, target) {
+  const hovered = handStates.some((state) => state.touchTarget === target ||
+    (target === "sensitivity" && state.touchTarget?.startsWith("sensitivity")));
+  context.fillStyle = hovered ? "#35483f" : "#222733";
   roundedRectPath(context, x, y, width, height, 18);
   context.fill();
-  context.strokeStyle = "#ffffff30";
+  context.strokeStyle = "#ffffff24";
   context.lineWidth = 2;
   context.stroke();
-  context.fillStyle = "#f4f3f0";
-  context.font = "24px sans-serif";
-  context.textAlign = "center";
+  context.textAlign = "left";
   context.textBaseline = "middle";
-  context.fillText(label, x + width / 2, y + height / 2, width - 20);
+  context.fillStyle = "#b9f3d4";
+  context.font = "28px sans-serif";
+  context.fillText(icon, x + 24, y + height / 2);
+  context.fillStyle = "#f4f3f0";
+  context.font = "600 21px sans-serif";
+  context.fillText(title, x + 82, y + 31);
+  context.fillStyle = "#aeb4c2";
+  context.font = "17px sans-serif";
+  context.fillText(detail, x + 82, y + 57);
 }
 
 function roundedRectPath(context, x, y, width, height, radius) {

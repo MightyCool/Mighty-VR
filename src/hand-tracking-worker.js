@@ -12,7 +12,7 @@ self.onmessage = async ({ data }) => {
         {
           baseOptions: { modelAssetPath: data.modelUrl, delegate: "CPU" },
           runningMode: "VIDEO",
-          numHands: 1,
+          numHands: 2,
           minHandDetectionConfidence: 0.55,
           minHandPresenceConfidence: 0.5,
           minTrackingConfidence: 0.5,
@@ -32,21 +32,24 @@ self.onmessage = async ({ data }) => {
     try {
       const startedAt = performance.now();
       const result = handLandmarker.detectForVideo(data.bitmap, data.timestamp);
-      const landmarks = result.landmarks[0];
       let packedLandmarks = null;
-      if (landmarks) {
-        packedLandmarks = new Float32Array(landmarks.length * 3);
-        for (let index = 0; index < landmarks.length; index += 1) {
-          const landmark = landmarks[index];
-          const offset = index * 3;
-          packedLandmarks[offset] = landmark.x;
-          packedLandmarks[offset + 1] = landmark.y;
-          packedLandmarks[offset + 2] = landmark.z;
+      if (result.landmarks.length) {
+        packedLandmarks = new Float32Array(result.landmarks.length * 21 * 3);
+        for (let handIndex = 0; handIndex < result.landmarks.length; handIndex += 1) {
+          const landmarks = result.landmarks[handIndex];
+          for (let index = 0; index < landmarks.length; index += 1) {
+            const landmark = landmarks[index];
+            const offset = handIndex * 21 * 3 + index * 3;
+            packedLandmarks[offset] = landmark.x;
+            packedLandmarks[offset + 1] = landmark.y;
+            packedLandmarks[offset + 2] = landmark.z;
+          }
         }
       }
       self.postMessage({
         type: "result",
         landmarks: packedLandmarks,
+        handedness: result.handedness.map((hand) => hand[0]?.categoryName?.toLowerCase()),
         timestamp: data.timestamp,
         inferenceMs: performance.now() - startedAt,
       }, packedLandmarks ? [packedLandmarks.buffer] : []);
