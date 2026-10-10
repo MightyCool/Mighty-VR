@@ -68,6 +68,7 @@ let handUiHeight = 0.96;
 let handAppScaleStep = 0;
 let handBrowserQuery = "";
 let handBrowserUrl = "";
+let handBrowserPageOpen = false;
 let handBrowserHistory = [];
 let handBrowserHistoryIndex = -1;
 let lastHandUiActivation = "";
@@ -1178,7 +1179,7 @@ function updateHandPose(state, landmarks, palmSize) {
   }
   if (!landmarksMoved && cameraUnchanged) {
     state.points[8].copy(
-      screenPointToWorld(landmarks[8].x, landmarks[8].y, state.depth, landmarks[8].z * state.depth * 1.5),
+      screenPointToWorld(landmarks[8].x, landmarks[8].y, state.depth, -landmarks[8].z * state.depth * 1.5),
     );
     state.cursor.position.copy(state.points[8]);
     return;
@@ -1195,7 +1196,7 @@ function updateHandPose(state, landmarks, palmSize) {
         landmark.x,
         landmark.y,
         state.depth,
-        landmark.z * state.depth * 1.5,
+        -landmark.z * state.depth * 1.5,
       ),
     );
   }
@@ -1285,8 +1286,9 @@ function getHandTouchTarget(state, fingertip) {
     if (y >= 108 && y <= 160) {
       if (x >= 34 && x < 80) return "browser-back";
       if (x >= 80 && x < 126) return "browser-forward";
-      if (x >= 680 && x <= 766) return "browser-open";
+      if (x >= 680 && x <= 766) return handBrowserPageOpen ? "browser-search" : "browser-open";
     }
+    if (handBrowserPageOpen) return null;
     if (y >= 370 && y <= 420) {
       if (x >= 34 && x < 278) return "browser-google";
       if (x >= 278 && x < 522) return "browser-youtube";
@@ -1359,6 +1361,10 @@ function activateHandTarget(target, now = performance.now(), state = null) {
     if (!handBrowserUrl) openHandBrowserUrl("https://www.google.com/webhp?igu=1");
   } else if (target === "browser-open") {
     openBrowserQuery();
+  } else if (target === "browser-search") {
+    handBrowserPageOpen = false;
+    updateBrowserViewportLayout();
+    drawHandUi();
   } else if (target === "browser-google") {
     openHandBrowserUrl("https://www.google.com/webhp?igu=1");
   } else if (target === "browser-youtube") {
@@ -1418,7 +1424,7 @@ function activateHandTarget(target, now = performance.now(), state = null) {
   }
   handUiPanel.visible = handUiMode !== "closed";
   handDockPanel.visible = handUiMode === "settings" || handUiMode === "browser";
-  if (browserObject) browserObject.visible = handUiMode === "browser";
+  if (browserObject) browserObject.visible = handUiMode === "browser" && handBrowserPageOpen;
   syncHandDockPosition();
   drawHandUi();
   drawHandDockBar();
@@ -1439,6 +1445,8 @@ function openHandBrowserUrl(url) {
     handBrowserHistoryIndex = handBrowserHistory.length - 1;
   }
   handBrowserUrl = url;
+  handBrowserPageOpen = true;
+  updateBrowserViewportLayout();
   if (browserFrame && browserFrame.src !== url) browserFrame.src = url;
   drawHandUi();
 }
@@ -1448,8 +1456,22 @@ function navigateHandBrowserHistory(direction) {
   if (nextIndex < 0 || nextIndex >= handBrowserHistory.length) return;
   handBrowserHistoryIndex = nextIndex;
   handBrowserUrl = handBrowserHistory[handBrowserHistoryIndex];
+  handBrowserPageOpen = true;
+  updateBrowserViewportLayout();
   if (browserFrame && browserFrame.src !== handBrowserUrl) browserFrame.src = handBrowserUrl;
   drawHandUi();
+}
+
+function updateBrowserViewportLayout() {
+  if (!browserViewport || !browserObject) return;
+  const top = 165;
+  const height = handBrowserPageOpen ? 455 : 190;
+  browserViewport.style.height = `${height}px`;
+  browserObject.position.set(
+    0,
+    (0.5 - (top + height / 2) / handUiCanvas.height) * 0.96,
+    0.012,
+  );
 }
 
 function openBrowserQuery() {
@@ -1804,37 +1826,37 @@ function drawBrowserApp(context) {
   context.textAlign = "center";
   context.fillStyle = "#19221e";
   context.font = "600 13px sans-serif";
-  context.fillText("Go", 719, 134);
+  context.fillText(handBrowserPageOpen ? "Search" : "Go", 719, 134);
 
   context.fillStyle = "#242936";
-  roundedRectPath(context, 34, 165, 732, 190, 12);
+  roundedRectPath(context, 34, 165, 732, handBrowserPageOpen ? 455 : 190, 12);
   context.fill();
   context.strokeStyle = "#ffffff55";
   context.lineWidth = 1;
   context.stroke();
-  if (stereoToggle.checked) {
+  if (handBrowserPageOpen) {
     context.textAlign = "center";
-    context.fillStyle = "#f4f3f0";
+    context.fillStyle = "#87909e";
     context.font = "14px sans-serif";
-    context.fillText("Webpage is shown at the center of headset view.", 400, 260);
+    context.fillText("Loading webpage…", 400, 390);
+  } else {
+    drawBrowserShortcut(context, 34, "Google", "Search", "G", "browser-google");
+    drawBrowserShortcut(context, 278, "YouTube", "Videos", "▶", "browser-youtube");
+    drawBrowserShortcut(context, 522, "Wikipedia", "Read", "W", "browser-wikipedia");
+
+    drawBrowserKeyboardRow(context, "qwertyuiop", 80, 425, 56, 8);
+    drawBrowserKeyboardRow(context, "asdfghjkl", 112, 464, 56, 8);
+    drawBrowserKeyboardRow(context, "zxcvbnm.-/", 80, 503, 56, 8);
+    drawBrowserKeyboardRow(context, "1234567890", 80, 542, 56, 8);
+    drawBrowserSpecialKey(context, 34, 581, 116, 42, "⌫", "browser-backspace");
+    drawBrowserSpecialKey(context, 160, 581, 105, 42, "Clear", "browser-clear");
+    drawBrowserSpecialKey(context, 275, 581, 270, 42, "Space", "browser-space");
+    drawBrowserSpecialKey(context, 555, 581, 211, 42, "Go / Search", "browser-open");
+    context.textAlign = "center";
+    context.fillStyle = "#87909e";
+    context.font = "11px sans-serif";
+    context.fillText("Websites that block embedded browsing may not display here.", 400, 408);
   }
-
-  drawBrowserShortcut(context, 34, "Google", "Search", "G", "browser-google");
-  drawBrowserShortcut(context, 278, "YouTube", "Videos", "▶", "browser-youtube");
-  drawBrowserShortcut(context, 522, "Wikipedia", "Read", "W", "browser-wikipedia");
-
-  drawBrowserKeyboardRow(context, "qwertyuiop", 80, 425, 56, 8);
-  drawBrowserKeyboardRow(context, "asdfghjkl", 112, 464, 56, 8);
-  drawBrowserKeyboardRow(context, "zxcvbnm.-/", 80, 503, 56, 8);
-  drawBrowserKeyboardRow(context, "1234567890", 80, 542, 56, 8);
-  drawBrowserSpecialKey(context, 34, 581, 116, 42, "⌫", "browser-backspace");
-  drawBrowserSpecialKey(context, 160, 581, 105, 42, "Clear", "browser-clear");
-  drawBrowserSpecialKey(context, 275, 581, 270, 42, "Space", "browser-space");
-  drawBrowserSpecialKey(context, 555, 581, 211, 42, "Go / Search", "browser-open");
-  context.textAlign = "center";
-  context.fillStyle = "#87909e";
-  context.font = "11px sans-serif";
-  context.fillText("Websites that block embedded browsing may not display here.", 400, 408);
 }
 
 function drawBrowserShortcut(context, x, title, detail, icon, target) {
@@ -2112,7 +2134,7 @@ function renderFrame() {
   updatePassthroughPlane();
   updateHandTracking();
   if (browserObject) {
-    browserObject.visible = handUiMode === "browser";
+    browserObject.visible = handUiMode === "browser" && handBrowserPageOpen;
   }
 
   if (!stereoToggle.checked) {
