@@ -16,7 +16,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  deploy_stream:
+    runs-on: ubuntu-latest
+    outputs:
+      api_base: ${{ steps.worker-url.outputs.api_base }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Find Cloudflare Workers subdomain
+        id: worker-url
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in repository Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          response=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain")
+          subdomain=$(echo "$response" | jq -er '.result.subdomain | select(length > 0)') || {
+            echo "::error::Enable the workers.dev subdomain for this Cloudflare account, then rerun this workflow."
+            exit 1
+          }
+          echo "api_base=https://mighty-vr-stream.$subdomain.workers.dev" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy stream pairing service
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy --config wrangler.toml
+
   build:
+    needs: deploy_stream
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -35,6 +74,8 @@ jobs:
         run: npm ci
 
       - name: Build static site
+        env:
+          VITE_STREAM_API_BASE: ${{ needs.deploy_stream.outputs.api_base }}
         run: npm run build
 
       - name: Upload Pages artifact

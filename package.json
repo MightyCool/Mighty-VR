@@ -7,7 +7,7 @@
   "scripts": {
     "build": "vite build --base=./",
     "start": "node server.js",
-    "start:https": "node server.js --https",
+    "start:https": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\start-https.ps1",
     "preview": "vite preview"
   },
   "dependencies": {

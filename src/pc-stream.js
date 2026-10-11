@@ -1,7 +1,12 @@
-const SIGNAL_POLL_INTERVAL_MS = 400;
+const STREAM_API_BASE = (import.meta.env?.VITE_STREAM_API_BASE || "").replace(/\/+$/, "");
+const SIGNAL_POLL_INTERVAL_MS = STREAM_API_BASE ? 1000 : 400;
 
 async function requestJson(path, options) {
-  const response = await fetch(path, {
+  if (!STREAM_API_BASE && window.location.hostname.endsWith(".github.io")) {
+    throw new Error("PC streaming is not configured for this GitHub Pages build yet. Finish the Cloudflare setup and deploy the site again.");
+  }
+
+  const response = await fetch(`${STREAM_API_BASE}${path}`, {
     ...options,
     headers: { "Content-Type": "application/json", ...options?.headers },
     cache: "no-store",
@@ -10,7 +15,7 @@ async function requestJson(path, options) {
   try {
     result = await response.json();
   } catch {
-    throw new Error("PC streaming needs the project server running locally with `npm.cmd start` or `npm.cmd run start:https`.");
+    throw new Error("The PC streaming service did not return a valid response. Check the local server or Cloudflare Worker deployment.");
   }
   if (!response.ok) throw new Error(result.error || `Stream request failed (${response.status}).`);
   return result;
@@ -21,7 +26,7 @@ export async function createPcStreamSession() {
 }
 
 export async function joinPcStreamSession(code) {
-  await requestJson("/api/stream/join", {
+  return requestJson("/api/stream/join", {
     method: "POST",
     body: JSON.stringify({ code }),
   });
@@ -57,11 +62,11 @@ export function createPcStreamPeer({ code, role, token, onTrack, onState }) {
   peer.onconnectionstatechange = () => {
     const state = peer.connectionState;
     onState(state === "connected" ? "connected" : state === "failed" ? "error" : state);
-    if (state === "failed") reportError("The PC-to-VR connection failed. Check both devices are on the same network and try again.");
+    if (state === "failed") reportError("A direct PC-to-VR route could not be established. Try connecting both devices to the same Wi-Fi network.");
   };
   peer.oniceconnectionstatechange = () => {
     if (peer.iceConnectionState === "failed") {
-      reportError("No direct network route was found. This stream currently requires both devices on the same local network.");
+      reportError("No direct network route was found. Try connecting both devices to the same Wi-Fi network.");
     }
   };
 

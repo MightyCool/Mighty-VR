@@ -9,7 +9,7 @@ The app uses Three.js and MediaPipe Tasks Vision, downloaded once by npm and ser
 - Windows 10 or 11 with [Node.js](https://nodejs.org/) installed.
 - A current browser on Windows 11, or Safari on an iPhone 7 running iOS 15.8.x.
 - Your computer and iPhone on the same Wi-Fi for local testing.
-- For iPhone motion tracking, a free locally trusted HTTPS certificate. See **Enable iPhone motion tracking** below.
+- For iPhone motion tracking on the published site, no certificate setup is needed; GitHub Pages uses HTTPS. Local-network testing still needs the optional HTTPS setup below for camera and motion access.
 
 The iPhone 7 supports up to iOS 15.8.x. Apple requires a user gesture to request motion permission in supported Safari versions, and motion access requires a secure (HTTPS) page. On desktop or on an unsecured local-network address, you can still explore using drag/touch and desktop arrow keys.
 
@@ -63,9 +63,19 @@ In GitHub Desktop, review the changes, enter a summary such as `Create DIY VR de
 5. On GitHub.com, open the repository's **Actions** tab. Wait for the **Deploy DIY VR to GitHub Pages** workflow to finish successfully.
 6. Return to **Settings → Pages** and open the published link. Its address will look like `https://YOUR-USERNAME.github.io/REPOSITORY-NAME/`.
 
-The included workflow at `.github/workflows/deploy.yml` builds the app with Vite and publishes the generated `dist` folder. After the initial setup, pushing a new commit automatically updates your test site. GitHub may take a minute or two to make each update available.
+The included workflow at `.github/workflows/deploy.yml` deploys the pairing Worker, builds the app with Vite, and publishes the generated `dist` folder. After the Cloudflare setup, pushing a new commit automatically updates both. GitHub may take a minute or two to make each update available.
 
-GitHub Pages serves static files only. PC-to-VR screen streaming uses the Node server's temporary signaling API, so run the site from the PC with `npm.cmd run start:https` and connect both devices to that same server and private Wi-Fi. The PC screen video travels directly between browsers with WebRTC; the Node server only relays pairing/signaling messages held temporarily in memory. A STUN service is used to help the devices find a direct route; no TURN relay is configured.
+GitHub Pages hosts the VR website. A Cloudflare Worker provides the small live pairing/signaling API that static hosting cannot run; GitHub Actions deploys it and builds the site with its URL. Screen video is sent directly between the PC and iPhone using WebRTC, not through Cloudflare. A public STUN service helps browsers find a direct route; no TURN relay is configured, so some networks may prevent a connection.
+
+### One-time Cloudflare setup for PC streaming
+
+1. Create a free Cloudflare account and enable the account's `workers.dev` subdomain in **Workers & Pages**.
+2. In Cloudflare, create an API token with **Account → Workers Scripts → Edit** permission for this account. Copy the token; do not put it in project files.
+3. On GitHub, open this repository's **Settings → Secrets and variables → Actions**. Add repository secrets named `CLOUDFLARE_API_TOKEN` (the token) and `CLOUDFLARE_ACCOUNT_ID` (from the Cloudflare account overview).
+4. Push to the `main` branch, or run **Deploy DIY VR to GitHub Pages** from **Actions → Run workflow**. The workflow deploys the Worker, builds the Pages site with its Worker URL, and then publishes the site. Wait for the workflow to finish successfully.
+5. Open the GitHub Pages address on both the PC and iPhone. You do not need to run `npm.cmd start`, create local certificates, or keep a local web server running for streaming.
+
+Cloudflare's free Durable Objects/Workers usage limits apply. The four-digit pairing API is public and intended for short-lived pairing only; separate host and viewer tokens protect signaling after pairing, and codes expire after ten minutes of inactivity.
 
 ### 4. Test it on your iPhone
 
@@ -73,7 +83,7 @@ Open the **published HTTPS GitHub Pages link** in Safari on your iPhone. Tap **E
 
 To try hand tracking, keep the phone's rear camera uncovered, tap **Enable hand tracking**, and allow camera access. The tracker can show both hands as articulated 3D skeletons, with palm depth oriented toward the camera. Curl the four fingers while leaving your thumb out to open the floating app dock. A fist only opens the dock; it does not close it. Touch or pinch **Settings** to open its smaller window; tap the size control in the upper-right to cycle through 1×, 1.5×, and 2×. The app dock remains just below an open app. Pinch and drag the **PINCH & DRAG** grip at the bottom of the dock to move the app and dock together around the room, including closer or farther away. Choose **Close Menu** at the right end of the dock to close it. The **Browser** app displays websites inside its in-world window, with an on-screen keyboard, back/forward controls for pages launched from the app, and Google, YouTube, and Wikipedia shortcuts. Type a search or URL and choose **Go / Search**; the webpage expands to fill the app window. Choose **Search** in the browser toolbar to return to the keyboard. Use direct screen touch or a mouse to interact with a loaded webpage. Some sites block display inside embedded frames. In headset view, the webpage is centered in the view. The dock stays at its opening position in the room instead of following your view. Its **Passthrough** button shows live rear-camera video behind the hand skeleton and 3D controls, while the room furniture is hidden; tap the button again to return to the 3D room. Touch or pinch an on-screen control to activate it. Hand and window depth is estimated from the camera image, so controls respond when a fingertip reaches the window surface. Tracking uses a background worker and SIMD-accelerated runtime where supported, while measured inference time adapts the camera-frame size and update rate. The current tracking FPS, inference time, and skipped camera frames are shown in the hand-tracking card. The room's rendering resolution is unchanged. Tap **Stop hand tracking** when finished. Camera access requires HTTPS (or localhost); the model runs locally and camera frames are not uploaded.
 
-Unlike the local Windows server, the published page stays available when your PC is turned off. GitHub Pages cannot host the temporary signaling service needed for PC-to-VR streaming; use the local HTTPS server for that feature. This project does not include a Windows companion app or SteamVR integration.
+The published page stays available when your PC is turned off, but the PC must be on and sharing its screen during a stream. The Worker handles only pairing; it does not capture, store, or relay screen video. This project does not include a Windows companion app or SteamVR integration.
 
 ### Test the production build on your PC first
 
@@ -99,65 +109,33 @@ Open `http://localhost:4173` in your PC browser. The output in `dist` is generat
 
 If the page will not load, check that both devices are on the same Wi-Fi network, the server is still running, you used the printed computer address, and Windows Firewall allows Node.js on your **private** network.
 
-### Enable iPhone motion tracking (free local HTTPS setup)
+### Enable iPhone motion tracking (automatic local HTTPS setup)
 
-Safari restricts motion sensors and camera access to a secure HTTPS page. A plain `http://<computer-IP>:8080` address will show an explanation and keep touch controls available. To enable motion tracking and rear-camera hand tracking on your home Wi-Fi, make a **locally trusted development certificate**. This setup keeps the certificate on your devices; it does not publish your site.
+When testing from the local-network server, Safari requires HTTPS for hand camera/motion access and local PC-to-VR streaming. The published GitHub Pages site already uses HTTPS and needs no local certificates. For local testing, the launcher below automatically installs `mkcert` with Windows Package Manager if needed, trusts its local certificate on the PC, and creates a certificate for the PC's current local IP addresses. No manual certificate commands or Wi-Fi adapter changes are needed.
 
-1. Install the free `mkcert` tool. If Windows Package Manager (`winget`) is available, open a **second** PowerShell terminal and run:
-
-   ```powershell
-   winget install --id FiloSottile.mkcert
-   ```
-
-   Close and reopen the terminal so `mkcert` is on your PATH.
-2. In VS Code's terminal, make a folder for your certificate files:
-
-   ```powershell
-   New-Item -ItemType Directory -Force certs
-   ```
-
-3. Copy the computer's local IPv4 address from the `npm.cmd start` output. Replace `192.168.1.23` below with **that exact address**, then run:
-
-   ```powershell
-   mkcert -install
-   mkcert -cert-file certs/dev-cert.pem -key-file certs/dev-key.pem localhost 127.0.0.1 192.168.1.23
-   ```
-
-4. In the same terminal, print the folder containing mkcert's root certificate:
-
-   ```powershell
-   mkcert -CAROOT
-   ```
-
-   Inside that folder, the public certificate is named `rootCA.pem`. Make a copy with the `.crt` extension, which iOS recognizes as a certificate:
-
-   ```powershell
-   $root = mkcert -CAROOT
-   Copy-Item (Join-Path $root 'rootCA.pem') '.\certs\rootCA.crt'
-   ```
-
-   **Only transfer `certs/rootCA.crt` to your iPhone. Never share `rootCA-key.pem` or `certs/dev-key.pem`.** Use a trusted method such as AirDrop or your own iCloud Drive. The iPhone and PC must still be on the same private Wi-Fi.
-5. Install the root certificate profile on the iPhone: open the `rootCA.pem` file there, allow the profile download, then open **Settings → Profile Downloaded** (or **Settings → General → VPN & Device Management**) and install it. Then open **Settings → General → About → Certificate Trust Settings**, find the mkcert root certificate, and switch on **full trust**. The setting may appear under the root certificate authority's name.
-6. Stop the HTTP server with **Ctrl+C**, then start HTTPS:
+1. Connect the PC and iPhone to the same private Wi-Fi network.
+2. Stop any existing server with **Ctrl+C**. In the project folder, run:
 
    ```powershell
    npm.cmd run start:https
    ```
 
-7. In Safari, open `https://192.168.1.23:8080`, using your actual PC IPv4 address instead. The address must match the certificate. Leave the HTTPS server running.
-8. Launch the demo, tap **Enable motion**, and **allow** Safari's motion permission if it asks. Move the phone and confirm the diagnostic changes to **MOTION ON** and its α/β/γ readings update.
+   The first run may ask Windows Package Manager (`winget`) to install `mkcert`; approve that installation. It can take a moment. The script does **not** reset or modify the network adapter.
+3. On the iPhone, open the `http://<PC-LAN-IP>:8081/` **iPhone first-time setup** address printed in the terminal. Tap **Download iPhone certificate**.
+4. On the iPhone, open **Settings → Profile Downloaded** and install the profile. Then go to **Settings → General → About → Certificate Trust Settings**, and turn on full trust for the mkcert certificate.
+5. In Safari, open the `https://<PC-LAN-IP>:8080` address printed by the server. Allow camera/motion permissions when prompted.
 
-mkcert installs a development root certificate on **your PC** and the separate root certificate profile installs trust on **your iPhone**. Only do this on your own devices and network; remove the profile from **Settings → General → VPN & Device Management** when you no longer need local development HTTPS. If your iPhone does not offer **Profile Downloaded**, use a trusted way to open/install the certificate profile or continue using drag controls instead.
+The setup page only serves the public root certificate over your private network. The signing key and server certificate remain on the PC in the git-ignored `certs` folder. Install the root certificate only on your own devices; remove it later from **Settings → General → VPN & Device Management** if you no longer need it. If your router assigns a new local IP after you reconnect Wi-Fi, stop the server and run `npm.cmd run start:https` again to generate a certificate for the new address.
 
 ### Stream the PC screen into VR
 
-1. Keep the Windows PC and iPhone on the same private Wi-Fi network, and use the locally trusted HTTPS certificate above.
-2. Stop the HTTP server if it is running, then start `npm.cmd run start:https` from the project folder. The page and signaling service must come from this same Node server; the GitHub Pages link is static and does not include pairing.
-3. On the PC, open `https://localhost:8080` in a current desktop browser and click **Start a Stream PC**. In the browser's screen picker, select **Entire Screen** and approve sharing. Keep this page open; it shows a four-digit pairing code.
-4. On the iPhone, open the same server using the PC's HTTPS LAN address (for example, `https://192.168.1.23:8080`). Open the demo, enable hand tracking, curl four fingers to show the dock, select **Stream**, enter the four digits, and press **Join stream**.
-5. The captured PC screen appears on a 3D panel in the VR space. Use **Stop** in the Stream app or **Stop sharing** on the PC to end it. Unpaired codes and inactive sessions expire after ten minutes.
+1. Complete the **One-time Cloudflare setup for PC streaming** above and wait for a successful GitHub Pages deployment.
+2. Open the published GitHub Pages HTTPS address on both the PC and iPhone. Keep both devices connected to the internet; they do not need to be on the same Wi-Fi.
+3. On the PC, open the demo page, click **Start a Stream PC**, select **Entire Screen** in the browser's picker, and approve sharing. Keep that browser tab open; it shows a four-digit pairing code.
+4. On the iPhone, open the demo and enable hand tracking. Curl four fingers to show the dock, select **Stream**, enter the four digits, and tap **Join stream**.
+5. The captured PC screen appears on a 3D panel in VR. Use **Stop** in the Stream app or **Stop sharing** on the PC to end it. Unpaired codes and inactive sessions expire after ten minutes.
 
-The server relays only temporary WebRTC signaling data in memory. Screen video is sent directly between the two browsers, not through the server. A public STUN service helps browsers establish a direct connection; no TURN relay is configured, so this is intended for devices on the same local network. The browser asks for permission and the person at the PC must choose which screen to share.
+The Cloudflare Worker relays only temporary WebRTC signaling data. Screen video is sent directly between the two browsers, not through the Worker. A public STUN service helps browsers establish a direct connection; no TURN relay is configured, so some networks may prevent a connection. The browser asks for permission and the person at the PC must choose which screen to share.
 
 ## Test checklist
 
@@ -166,7 +144,7 @@ The server relays only temporary WebRTC signaling data in memory. Screen video i
 - **Stereoscopic mode:** Turn **Headset view** on. The app switches to a full-screen room drawn as two adjacent half-width camera views; `LEFT EYE` and `RIGHT EYE` labels identify them. `Recenter` and `Exit headset view` remain available as floating controls. Place the phone screen horizontally in your two-lens headset and center the seam between the lenses. Adjust headset straps/spacing for comfort. Exit to return to one view and the settings.
 - **Hand tracking:** On HTTPS, allow camera access and verify that both rear-camera hand skeletons appear. Curl four fingers with the thumb out to open the floating dock. Touch or pinch Settings to open the in-world settings window; verify the dock stays below it, drag its lower grip to reposition both panels, and choose Close Menu to dismiss them. Passthrough shows the live camera view behind the hand skeletons and UI, and toggling it off restores the furnished room.
 - **In-world browser:** Open Browser from the dock, enter a URL or search, and tap **Go / Search**. The page expands to fill the floating browser window; choose **Search** in its toolbar to return to the on-screen keyboard. Webpage controls accept regular screen touch or mouse input; websites that prohibit iframe embedding may refuse to load.
-- **PC screen stream:** With the project running from the local HTTPS server on both devices, click **Start a Stream PC** on the computer and choose **Entire Screen** in the browser's screen-share prompt. Enter the displayed four-digit code in the VR app dock's **Stream** app. Both devices must be on the same private network; codes expire after ten minutes. Stop sharing on the PC or tap **Stop** in VR to end the session.
+- **PC screen stream:** After configuring Cloudflare and publishing the Pages site, open that HTTPS site on both devices. On the computer click **Start a Stream PC** and choose **Entire Screen** in the browser's screen-share prompt. Enter the displayed four-digit code in the VR app dock's **Stream** app. The Worker relays signaling only; WebRTC sends the video directly, and some networks may still prevent a direct connection. Codes expire after ten minutes. Stop sharing on the PC or tap **Stop** in VR to end the session.
 - **Motion tracking:** On iPhone Safari, open the trusted HTTPS address and tap **Enable motion** (this button supplies the required iOS permission gesture). Accept the permission prompt. The indicator should say **MOTION ON**, and α/β/γ should change as you rotate the phone. Use **Recenter your view** to set the current phone direction as forward.
 - **Permission denied / no sensor:** Deny permission or use HTTP on the local network. The app reports why phone motion is unavailable; dragging and arrow keys continue to work.
 - **Sensitivity:** Move **Look sensitivity** left/right and compare how far a drag or arrow-key press turns the view.
@@ -176,5 +154,5 @@ The server relays only temporary WebRTC signaling data in memory. Screen video i
 - The included Three.js version supports WebGL 1, which helps compatibility with older Safari/iOS versions such as those available on iPhone 7. A browser with WebGL disabled cannot render the scene; the app shows a fallback message.
 - If the iPhone runs an older iOS release, update it to the latest release available for iPhone 7 (up to iOS 15.8.x). In Safari, also check **Settings → Safari → Motion & Orientation Access** if the site received permission but no sensor readings arrive.
 - This is a browser demo, not a calibrated or certified VR headset. It provides side-by-side images and phone orientation, but no lens-distortion correction, positional tracking, controllers, or guaranteed lens alignment. Start with short sessions and stop if you feel uncomfortable.
-- Motion readings and hand-camera frames stay on the device. The in-world Browser intentionally loads the websites selected by the user, which can receive ordinary website requests and may apply their own embedding restrictions. PC screen video is sent directly browser-to-browser; the local Node server relays temporary signaling data, and a public STUN server helps establish a direct network route. Text uses the fonts already available on your device.
+- Motion readings and hand-camera frames stay on the device. The in-world Browser intentionally loads the websites selected by the user, which can receive ordinary website requests and may apply their own embedding restrictions. PC screen video is sent directly browser-to-browser; the Cloudflare Worker (or local Node server during local development) relays temporary signaling data, and a public STUN server helps establish a direct network route. Text uses the fonts already available on your device.
 - Only **Step 1** is included. This project does not include a Windows companion app, SteamVR integration, or later project stages.

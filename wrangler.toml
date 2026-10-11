@@ -1,0 +1,12 @@
+name = "mighty-vr-stream"
+main = "stream-worker.js"
+compatibility_date = "2025-03-01"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "STREAM_SESSIONS"
+class_name = "StreamSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["StreamSession"]

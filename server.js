@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const port = Number(process.env.PORT || 8080);
+const setupPort = Number(process.env.SETUP_PORT || port + 1);
 const wantsHttps = process.argv.includes("--https");
 const publicFiles = new Set([
   "index.html",
@@ -138,8 +139,9 @@ async function handleStreamApi(request, response, url) {
     }
     failedStreamJoins.delete(request.socket.remoteAddress || "unknown");
     session.viewerJoined = true;
+    session.viewerToken = randomBytes(24).toString("hex");
     session.expiresAt = Date.now() + STREAM_SESSION_TTL_MS;
-    sendJson(response, 200, { joined: true });
+    sendJson(response, 200, { joined: true, token: session.viewerToken });
     return true;
   }
 
@@ -150,7 +152,10 @@ async function handleStreamApi(request, response, url) {
       sendJson(response, 404, { error: "Stream session not found." });
       return true;
     }
-    if ((role === "host" && token !== session.token) || (role === "viewer" && !session.viewerJoined)) {
+    if (
+      (role === "host" && token !== session.token) ||
+      (role === "viewer" && (!session.viewerJoined || token !== session.viewerToken))
+    ) {
       sendJson(response, 403, { error: "This device is not paired with the stream." });
       return true;
     }
@@ -193,7 +198,10 @@ async function handleStreamApi(request, response, url) {
       sendJson(response, 404, { error: "Stream session not found." });
       return true;
     }
-    if ((role === "host" && token !== session.token) || (role === "viewer" && !session.viewerJoined)) {
+    if (
+      (role === "host" && token !== session.token) ||
+      (role === "viewer" && (!session.viewerJoined || token !== session.viewerToken))
+    ) {
       sendJson(response, 403, { error: "This device is not paired with the stream." });
       return true;
     }
@@ -264,6 +272,64 @@ async function serveFile(request, response) {
   }
 }
 
+async function serveCertificateSetup(request, response) {
+  if (request.method !== "GET") {
+    response.writeHead(405, { Allow: "GET" }).end("Method not allowed");
+    return;
+  }
+  const pathname = new URL(request.url, "http://localhost").pathname;
+  if (pathname === "/rootCA.crt") {
+    try {
+      const certificate = await readFile(resolve(root, "certs", "rootCA.pem"));
+      response.writeHead(200, {
+        "Content-Type": "application/pkix-cert",
+        "Content-Disposition": "attachment; filename=\"rootCA.crt\"",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      });
+      response.end(certificate);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        response.writeHead(404).end("Certificate setup has not run yet. Start with npm.cmd run start:https.");
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+  if (pathname !== "/") {
+    response.writeHead(404).end("Not found");
+    return;
+  }
+  response.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(`<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101319">
+<title>Set up DIY VR on iPhone</title>
+<style>
+  body{max-width:620px;margin:40px auto;padding:0 20px;background:#101319;color:#f4f3f0;font:16px/1.6 system-ui,-apple-system,sans-serif}
+  h1{color:#b9f3d4;font-size:26px}li{margin:12px 0}a{display:inline-block;margin:10px 0;padding:12px 16px;border-radius:8px;background:#b9f3d4;color:#101319;font-weight:700;text-decoration:none}
+  code{color:#d1c3ff}strong{color:#fff}
+</style>
+<h1>Set up secure access for DIY VR</h1>
+<p>This one-time step lets iPhone Safari use the camera and motion sensors with your PC-hosted VR site.</p>
+<ol>
+  <li>Tap the button to download the local certificate. It is a public certificate; this page does not expose the private key.</li>
+  <li>Open <strong>Settings</strong> and tap <strong>Profile Downloaded</strong>, then install the mkcert profile.</li>
+  <li>Go to <strong>Settings → General → About → Certificate Trust Settings</strong> and turn on full trust for the mkcert certificate.</li>
+  <li>Return to Safari and open the HTTPS address printed by the PC, such as <code>https://192.168.1.23:8080</code>.</li>
+</ol>
+<p><a href="/rootCA.crt">Download iPhone certificate</a></p>
+<p>Only install this certificate on your own iPhone. Keep the PC's <code>certs/dev-key.pem</code> private.</p>
+</html>`);
+}
+
 function printAddresses(protocol) {
   console.log(`DIY VR is running on ${protocol} port ${port}.`);
   console.log(`On this PC: ${protocol}://localhost:${port}`);
@@ -279,7 +345,14 @@ function printAddresses(protocol) {
   if (protocol === "http") {
     console.log("For iPhone motion tracking, use HTTPS; see the README for free local setup.");
   } else {
-    console.log("Keep the certificate files private; they are excluded from version control.");
+    for (const addresses of Object.values(networkInterfaces())) {
+      for (const address of addresses || []) {
+        if (address.family === "IPv4" && !address.internal) {
+          console.log(`On iPhone first-time setup: http://${address.address}:${setupPort}/`);
+        }
+      }
+    }
+    console.log("Keep the certificate private key private; it is excluded from version control.");
   }
 }
 
@@ -307,4 +380,19 @@ if (wantsHttps) {
 
 if (server) {
   server.listen(port, "0.0.0.0", () => printAddresses(wantsHttps ? "https" : "http"));
+  if (wantsHttps) {
+    const certificateSetupServer = createServer((request, response) => {
+      serveCertificateSetup(request, response).catch((error) => {
+        console.error("Unable to serve the iPhone certificate setup page:", error);
+        if (!response.headersSent) response.writeHead(500);
+        response.end("Unable to serve the certificate setup page.");
+      });
+    });
+    certificateSetupServer.on("error", (error) => {
+      console.error(`Unable to start the iPhone certificate setup server on port ${setupPort}:`, error);
+    });
+    certificateSetupServer.listen(setupPort, "0.0.0.0", () => {
+      console.log(`iPhone certificate setup is available on HTTP port ${setupPort}.`);
+    });
+  }
 }

@@ -1659,10 +1659,11 @@ async function connectVrScreenStream() {
     stopVrScreenStream();
     streamStatus = "Connecting to the PC…";
     drawHandUi();
-    await joinPcStreamSession(streamCode);
+    const viewerSession = await joinPcStreamSession(streamCode);
     vrStreamPeer = createPcStreamPeer({
       code: streamCode,
       role: "viewer",
+      token: viewerSession.token,
       onTrack: (mediaStream) => {
         streamVideo.srcObject = mediaStream;
         streamVideo.play().catch((error) => {
